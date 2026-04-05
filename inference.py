@@ -29,6 +29,7 @@ load_dotenv()
 import asyncio
 import json
 import os
+import re
 import subprocess
 import textwrap
 import time
@@ -45,8 +46,8 @@ MODEL_NAME = os.environ["MODEL_NAME"]
 TASK_NAME = os.getenv("LEGAL_ENV_TASK", "easy_nda_review")
 BENCHMARK = "legal-contract-review"
 MAX_STEPS = int(os.getenv("MAX_STEPS", "8"))
-TEMPERATURE = 0.2
-MAX_TOKENS = 800
+TEMPERATURE = 0.0
+MAX_TOKENS = 4096
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
 
 
@@ -93,26 +94,40 @@ class Port7860DockerProvider(LocalDockerProvider):
         return f"http://localhost:{port}"
 
 
-SYSTEM_PROMPT = """
-You are a strict legal contract reviewer.
+SYSTEM_PROMPT = textwrap.dedent("""\
+You are an expert legal contract compliance auditor for Fortune 500 procurement.
 
-Your job is to find ALL violations in the contract.
+Your task is to review a supplier contract against a specific set of policy rules and identify ALL violations.
 
-IMPORTANT:
-- Assume violations exist
-- DO NOT return empty array unless absolutely certain
-- Even minor issues count as violations
+## INSTRUCTIONS
+1. Read the contract text carefully, clause by clause.
+2. Check EACH rule in the provided rules list against the contract.
+3. For each rule, determine if the contract violates it.
+4. A violation exists when the contract does NOT meet the policy requirement stated in the rule.
+5. You MUST use the EXACT rule_id from the rules list (e.g., "PAY-001", "CONF-001").
+6. Be thorough — missing a real violation is worse than a false positive.
+7. If you received feedback from a previous attempt, use it to correct your answer. Pay special attention to any "Missed" violations mentioned in the feedback.
 
-Return STRICT JSON only:
+## SEVERITY GUIDELINES
+- "critical": Missing clauses that create major legal/financial exposure (e.g., no liability cap, IP transfer to vendor)
+- "high": Terms that significantly deviate from policy (e.g., payment >60 days, no SLA penalties)
+- "medium": Moderate deviations (e.g., short termination notice, currency risk)
+- "low": Minor issues with limited business impact
+
+## OUTPUT FORMAT
+Return ONLY a valid JSON array. No markdown, no code fences, no explanation outside the JSON.
+Each element must have exactly these fields:
 [
   {
-    "rule_id": "...",
-    "description": "...",
-    "severity": "critical|high|medium|low",
-    "clause_reference": "Section X"
+    "rule_id": "<exact rule_id from the rules list, e.g. PAY-001>",
+    "description": "<specific explanation of what the contract says vs what the policy requires>",
+    "severity": "<critical|high|medium|low>",
+    "clause_reference": "<Section number where the violation appears, e.g. Section 2>"
   }
 ]
-"""
+
+IMPORTANT: Use the EXACT rule_id values from the rules list. Do NOT invent new rule IDs.
+""")
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -137,25 +152,77 @@ def log_end(success: bool, steps: int, rewards: List[float]) -> None:
 
 
 def build_user_prompt(contract_text, rules_to_check, step, feedback):
-    rules_block = "\n".join(f"- {r}" for r in rules_to_check)
-    return f"""
-Step: {step}
+    rules_block = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(rules_to_check))
 
-CONTRACT:
-{contract_text}
+    prompt_parts = []
 
-RULES:
-{rules_block}
+    prompt_parts.append(f"## CONTRACT TEXT\n{contract_text.strip()}")
 
-Find all violations. Return JSON only.
-"""
+    prompt_parts.append(f"""## POLICY RULES TO CHECK
+Check EACH of the following rules against the contract. For every rule that is violated, include it in your output with the EXACT rule_id shown:
+{rules_block}""")
+
+    if feedback and step > 1 and "Review the contract" not in feedback:
+        prompt_parts.append(f"""## FEEDBACK FROM PREVIOUS ATTEMPT (Step {step - 1})
+{feedback}
+
+IMPORTANT: Carefully review the feedback above. If violations were "Missed", you MUST find and include them this time. If there were "False positives", remove those from your answer. Keep all previously "Matched" violations.""")
+
+    prompt_parts.append(f"""## TASK
+Analyze the contract against ALL {len(rules_to_check)} rules listed above.
+Return a JSON array with one entry per violation found. Use the EXACT rule_id values from the rules list.""")
+
+    return "\n\n".join(prompt_parts)
+
+
+def extract_json_from_text(text: str) -> Optional[list]:
+    """Robustly extract JSON array from model output."""
+    # Strip markdown code fences
+    text = text.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
+    text = text.strip()
+
+    # Try direct parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return [result]
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON array in text
+    bracket_match = re.search(r'\[[\s\S]*\]', text)
+    if bracket_match:
+        try:
+            result = json.loads(bracket_match.group())
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find individual JSON objects
+    objects = re.findall(r'\{[^{}]*\}', text)
+    if objects:
+        results = []
+        for obj_str in objects:
+            try:
+                results.append(json.loads(obj_str))
+            except json.JSONDecodeError:
+                continue
+        if results:
+            return results
+
+    return None
 
 
 def get_model_violations(client, contract_text, rules_to_check, step, feedback):
     user_prompt = build_user_prompt(contract_text, rules_to_check, step, feedback)
 
     print("\n===== USER PROMPT =====")
-    print(user_prompt)
+    print(user_prompt[:500] + "..." if len(user_prompt) > 500 else user_prompt)
 
     try:
         completion = client.chat.completions.create(
@@ -173,29 +240,53 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
         print("\n===== RAW MODEL OUTPUT =====")
         print(text)
 
-        text = text.replace("```json", "").replace("```", "").strip()
-
-        try:
-            raw = json.loads(text)
-        except Exception as e:
-            print("❌ JSON ERROR:", e)
+        raw = extract_json_from_text(text)
+        if raw is None:
+            print("❌ JSON EXTRACTION FAILED - no valid JSON found in output")
             return []
 
         print("PARSED:", raw)
 
+        # Validate and build violations with flexible field mapping
         violations = []
+        valid_rule_ids = set()
+        for rule in rules_to_check:
+            # Extract rule_id from format like "PAY-001: Payment terms must be <= 60 days"
+            rule_id = rule.split(":")[0].strip()
+            valid_rule_ids.add(rule_id)
+
         for item in raw:
             try:
-                violations.append(PolicyViolation.model_validate(item))
-            except Exception as e:
-                print("❌ VALIDATION ERROR:", e)
+                # Normalize the item to match PolicyViolation schema
+                normalized = {}
+                normalized["rule_id"] = item.get("rule_id", "UNKNOWN")
+                normalized["description"] = item.get("description", item.get("reasoning", ""))
+                normalized["severity"] = item.get("severity", "medium").lower()
+                normalized["clause_reference"] = item.get("clause_reference", item.get("section", None))
 
-        print("FINAL:", violations)
+                # Validate severity
+                if normalized["severity"] not in ("critical", "high", "medium", "low"):
+                    normalized["severity"] = "medium"
+
+                violation = PolicyViolation.model_validate(normalized)
+
+                # Only include violations with valid rule_ids
+                if violation.rule_id in valid_rule_ids:
+                    violations.append(violation)
+                else:
+                    print(f"⚠️ Skipping unknown rule_id: {violation.rule_id} (valid: {valid_rule_ids})")
+
+            except Exception as e:
+                print(f"❌ VALIDATION ERROR: {e}")
+
+        print(f"FINAL: {len(violations)} violations (from {len(raw)} raw items)")
+        for v in violations:
+            print(f"  - {v.rule_id}: {v.description[:80]}... [{v.severity}]")
 
         return violations
 
     except Exception as e:
-        print("❌ LLM ERROR:", e)
+        print(f"❌ LLM ERROR: {e}")
         return []
 
 
@@ -218,6 +309,7 @@ async def main():
 
     rewards = []
     steps = 0
+    best_violations = []
 
     for step in range(1, MAX_STEPS + 1):
         obs = result.observation
@@ -230,9 +322,16 @@ async def main():
             obs.feedback,
         )
 
+        # Accumulate violations across steps: merge new findings with previous best
+        if step > 1 and best_violations:
+            existing_ids = {v.rule_id for v in violations}
+            for prev_v in best_violations:
+                if prev_v.rule_id not in existing_ids:
+                    violations.append(prev_v)
+
         action = Action(
             identified_violations=violations,
-            reasoning=f"step {step}"
+            reasoning=f"Step {step}: Identified {len(violations)} violations by checking each policy rule against contract clauses."
         )
 
         result = await env.step(action)
@@ -240,6 +339,10 @@ async def main():
         reward = result.reward or 0.0
         rewards.append(reward)
         steps = step
+
+        # Track best set of violations
+        if reward > 0 or step == 1:
+            best_violations = violations.copy()
 
         log_step(step, f"{len(violations)}_violations", reward, result.done, None)
 
