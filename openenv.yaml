@@ -1,0 +1,6 @@
+spec_version: 1
+name: legal-contract-review
+type: text
+runtime: python
+app: server/app.py
+port: 7860

@@ -1,0 +1,47 @@
+# 🔒 Environment & Secrets
+.env
+.env.*
+*.env
+
+# 🐍 Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# 🧪 Virtual Environments
+.venv/
+venv/
+env/
+
+# 📦 Build / Packaging
+build/
+dist/
+*.egg-info/
+
+# 🧰 IDE / Editor
+.vscode/
+.idea/
+
+# 🐳 Docker
+*.log
+
+# 🧾 OS files
+.DS_Store
+Thumbs.db
+
+# 🧪 Testing / cache
+.pytest_cache/
+.coverage
+
+# 🔐 Secrets / keys (extra safety)
+*.pem
+*.key
+*.crt
+
+# 🚫 Node (if ever used)
+node_modules/
+
+# 🧠 Misc
+*.sqlite3
