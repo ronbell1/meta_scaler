@@ -45,3 +45,5 @@ node_modules/
 
 # 🧠 Misc
 *.sqlite3
+
+.ruff_cache/

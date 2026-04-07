@@ -1,5 +1,5 @@
 spec_version: 1
-name: legal-contract-review
+name: procurement-contract-audit
 type: text
 runtime: python
 app: server/app.py

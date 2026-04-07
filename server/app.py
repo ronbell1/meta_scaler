@@ -1,19 +1,17 @@
 from openenv.core.env_server.http_server import create_app
-from .environment import LegalContractEnv
+from .environment import ProcurementAuditEnv
 
 try:
-    # Primary path: CWD-based execution (uv run server / uvicorn server.app:app)
     from models import Action, Observation
 except ImportError:
-    # Fallback: installed as sub-package of a larger project
     from ..models import Action, Observation
 
 
 app = create_app(
-    LegalContractEnv,
+    ProcurementAuditEnv,
     Action,
     Observation,
-    env_name="legal-contract-review",
+    env_name="procurement-contract-audit",
     max_concurrent_envs=1,
 )
 

@@ -1,6 +1,6 @@
 """
-Inference Script - Legal Contract Review OpenEnv
-===================================
+Inference Script - Procurement Contract Anomaly Auditor OpenEnv
+===============================================================
 MANDATORY env vars:
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
@@ -23,7 +23,9 @@ STDOUT FORMAT
     - error is the raw last_action_error string, or null if none.
     - All fields on a single line with no newlines within a line.
 """
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import asyncio
@@ -43,9 +45,9 @@ from my_env import Action, LegalContractClient
 
 API_BASE_URL = os.environ["API_BASE_URL"]
 MODEL_NAME = os.environ["MODEL_NAME"]
-TASK_NAME = os.getenv("LEGAL_ENV_TASK", "easy_nda_review")
-BENCHMARK = "legal-contract-review"
-MAX_STEPS = int(os.getenv("MAX_STEPS", "8"))
+TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
+BENCHMARK = "procurement-contract-audit"
+MAX_STEPS = int(os.getenv("MAX_STEPS", "10"))
 TEMPERATURE = 0.0
 MAX_TOKENS = 4096
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
@@ -80,14 +82,14 @@ class Port7860DockerProvider(LocalDockerProvider):
 
         cmd.append(image)
 
-        print("\n🚀 Starting Docker container...")
+        print("\nStarting Docker container...")
         print("COMMAND:", " ".join(cmd))
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             self._container_id = result.stdout.strip()
         except subprocess.CalledProcessError as exc:
-            print("❌ DOCKER ERROR:", exc.stderr)
+            print("DOCKER ERROR:", exc.stderr)
             raise RuntimeError("Docker failed") from exc
 
         time.sleep(1)
@@ -104,14 +106,14 @@ Your task is to review a supplier contract against a specific set of policy rule
 2. Check EACH rule in the provided rules list against the contract.
 3. For each rule, determine if the contract violates it.
 4. A violation exists when the contract does NOT meet the policy requirement stated in the rule.
-5. You MUST use the EXACT rule_id from the rules list (e.g., "PAY-001", "CONF-001").
+5. You MUST use the EXACT rule_id from the rules list (e.g., "RULE_01", "RULE_14").
 6. Be thorough — missing a real violation is worse than a false positive.
-7. If you received feedback from a previous attempt, use it to correct your answer. Pay special attention to any "Missed" violations mentioned in the feedback.
+7. If you received feedback from a previous attempt, use it to correct your answer.
 
 ## SEVERITY GUIDELINES
-- "critical": Missing clauses that create major legal/financial exposure (e.g., no liability cap, IP transfer to vendor)
-- "high": Terms that significantly deviate from policy (e.g., payment >60 days, no SLA penalties)
-- "medium": Moderate deviations (e.g., short termination notice, currency risk)
+- "critical": Missing clauses that create major legal/financial exposure
+- "high": Terms that significantly deviate from policy
+- "medium": Moderate deviations from policy standards
 - "low": Minor issues with limited business impact
 
 ## OUTPUT FORMAT
@@ -119,10 +121,10 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation outs
 Each element must have exactly these fields:
 [
   {
-    "rule_id": "<exact rule_id from the rules list, e.g. PAY-001>",
+    "rule_id": "<exact rule_id from the rules list, e.g. RULE_02>",
     "description": "<specific explanation of what the contract says vs what the policy requires>",
     "severity": "<critical|high|medium|low>",
-    "clause_reference": "<Section number where the violation appears, e.g. Section 2>"
+    "clause_reference": "<Section name where the violation appears>"
   }
 ]
 
@@ -152,7 +154,7 @@ def log_end(success: bool, steps: int, rewards: List[float]) -> None:
 
 
 def build_user_prompt(contract_text, rules_to_check, step, feedback):
-    rules_block = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(rules_to_check))
+    rules_block = "\n".join(f"  {i + 1}. {r}" for i, r in enumerate(rules_to_check))
 
     prompt_parts = []
 
@@ -177,13 +179,11 @@ Return a JSON array with one entry per violation found. Use the EXACT rule_id va
 
 def extract_json_from_text(text: str) -> Optional[list]:
     """Robustly extract JSON array from model output."""
-    # Strip markdown code fences
     text = text.strip()
-    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
     text = text.strip()
 
-    # Try direct parse
     try:
         result = json.loads(text)
         if isinstance(result, list):
@@ -193,8 +193,7 @@ def extract_json_from_text(text: str) -> Optional[list]:
     except json.JSONDecodeError:
         pass
 
-    # Try to find JSON array in text
-    bracket_match = re.search(r'\[[\s\S]*\]', text)
+    bracket_match = re.search(r"\[[\s\S]*\]", text)
     if bracket_match:
         try:
             result = json.loads(bracket_match.group())
@@ -203,8 +202,7 @@ def extract_json_from_text(text: str) -> Optional[list]:
         except json.JSONDecodeError:
             pass
 
-    # Try to find individual JSON objects
-    objects = re.findall(r'\{[^{}]*\}', text)
+    objects = re.findall(r"\{[^{}]*\}", text)
     if objects:
         results = []
         for obj_str in objects:
@@ -242,42 +240,37 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
 
         raw = extract_json_from_text(text)
         if raw is None:
-            print("❌ JSON EXTRACTION FAILED - no valid JSON found in output")
+            print("JSON EXTRACTION FAILED - no valid JSON found in output")
             return []
 
         print("PARSED:", raw)
 
-        # Validate and build violations with flexible field mapping
         violations = []
         valid_rule_ids = set()
         for rule in rules_to_check:
-            # Extract rule_id from format like "PAY-001: Payment terms must be <= 60 days"
             rule_id = rule.split(":")[0].strip()
             valid_rule_ids.add(rule_id)
 
         for item in raw:
             try:
-                # Normalize the item to match PolicyViolation schema
                 normalized = {}
                 normalized["rule_id"] = item.get("rule_id", "UNKNOWN")
                 normalized["description"] = item.get("description", item.get("reasoning", ""))
                 normalized["severity"] = item.get("severity", "medium").lower()
                 normalized["clause_reference"] = item.get("clause_reference", item.get("section", None))
 
-                # Validate severity
                 if normalized["severity"] not in ("critical", "high", "medium", "low"):
                     normalized["severity"] = "medium"
 
                 violation = PolicyViolation.model_validate(normalized)
 
-                # Only include violations with valid rule_ids
                 if violation.rule_id in valid_rule_ids:
                     violations.append(violation)
                 else:
-                    print(f"⚠️ Skipping unknown rule_id: {violation.rule_id} (valid: {valid_rule_ids})")
+                    print(f"Skipping unknown rule_id: {violation.rule_id} (valid: {valid_rule_ids})")
 
             except Exception as e:
-                print(f"❌ VALIDATION ERROR: {e}")
+                print(f"VALIDATION ERROR: {e}")
 
         print(f"FINAL: {len(violations)} violations (from {len(raw)} raw items)")
         for v in violations:
@@ -286,26 +279,21 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
         return violations
 
     except Exception as e:
-        print(f"❌ LLM ERROR: {e}")
+        print(f"LLM ERROR: {e}")
         return []
 
 
-async def main():
-    client = OpenAI(
-        base_url=os.environ["API_BASE_URL"],
-        api_key=os.environ["HF_TOKEN"]
-    )
+async def run_task(task_id: str):
+    """Run a single task and return results."""
+    client = OpenAI(base_url=os.environ["API_BASE_URL"], api_key=os.environ["HF_TOKEN"])
 
-    image_name = os.environ.get("LOCAL_IMAGE_NAME")
+    image_name = os.environ.get("LOCAL_IMAGE_NAME", "procurement-contract-env")
 
-    log_start(TASK_NAME, BENCHMARK, MODEL_NAME)
+    log_start(task_id, BENCHMARK, MODEL_NAME)
 
-    env = await LegalContractClient.from_docker_image(
-        image_name,
-        provider=Port7860DockerProvider()
-    )
+    env = await LegalContractClient.from_docker_image(image_name, provider=Port7860DockerProvider())
 
-    result = await env.reset(task_name=TASK_NAME)
+    result = await env.reset(task_id=task_id)
 
     rewards = []
     steps = 0
@@ -322,7 +310,6 @@ async def main():
             obs.feedback,
         )
 
-        # Accumulate violations across steps: merge new findings with previous best
         if step > 1 and best_violations:
             existing_ids = {v.rule_id for v in violations}
             for prev_v in best_violations:
@@ -331,7 +318,7 @@ async def main():
 
         action = Action(
             identified_violations=violations,
-            reasoning=f"Step {step}: Identified {len(violations)} violations by checking each policy rule against contract clauses."
+            reasoning=f"Step {step}: Identified {len(violations)} violations by checking each policy rule against contract clauses.",
         )
 
         result = await env.step(action)
@@ -340,7 +327,6 @@ async def main():
         rewards.append(reward)
         steps = step
 
-        # Track best set of violations
         if reward > 0 or step == 1:
             best_violations = violations.copy()
 
@@ -353,6 +339,23 @@ async def main():
 
     success = sum(rewards) >= SUCCESS_SCORE_THRESHOLD
     log_end(success, steps, rewards)
+
+    return success, sum(rewards), steps
+
+
+async def main():
+    """Run all tasks or a single task based on env var."""
+    task_id = os.getenv("PROCUREMENT_TASK", "easy")
+
+    if task_id == "all":
+        for tid in ["easy", "medium", "hard"]:
+            print(f"\n{'=' * 60}")
+            print(f"Running task: {tid}")
+            print(f"{'=' * 60}")
+            success, total_reward, steps = await run_task(tid)
+            print(f"\nTask {tid}: success={success}, total_reward={total_reward:.2f}, steps={steps}")
+    else:
+        await run_task(task_id)
 
 
 if __name__ == "__main__":

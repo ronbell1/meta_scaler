@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from openenv.core.env_server.types import Action as OpenEnvAction
 from openenv.core.env_server.types import Observation as OpenEnvObservation
@@ -24,8 +24,9 @@ class Observation(OpenEnvObservation):
     """What the agent sees each step."""
 
     contract_text: str
-    task_name: str
-    step: int
+    task_id: str = ""
+    task_name: str = ""
+    step: int = 0
     last_reward: float = 0.0
     feedback: Optional[str] = None
     rules_to_check: List[str] = Field(default_factory=list)
@@ -34,8 +35,9 @@ class Observation(OpenEnvObservation):
 class State(OpenEnvState):
     """Full internal state (not fully exposed to agent)."""
 
-    task_name: str
-    contract_text: str
+    task_id: str = ""
+    task_name: str = ""
+    contract_text: str = ""
     gold_violations: List[PolicyViolation] = Field(default_factory=list)
     agent_violations: List[PolicyViolation] = Field(default_factory=list)
     step: int = 0
