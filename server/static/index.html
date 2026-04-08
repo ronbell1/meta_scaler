@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Procurement Contract Anomaly Auditor — OpenEnv</title>
+<meta name="description" content="AI-powered procurement contract anomaly auditor — a multi-step RL sandbox for deterministic contract review with 30 policy rules.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#1a1a1a;--bg-card:#232323;--bg-hover:#2a2a2a;--bg-input:#1e1e1e;
+  --border:#333;--border-light:#3a3a3a;
+  --text:#e0e0e0;--text-dim:#888;--text-bright:#fff;
+  --green:#4ade80;--green-dim:#22543d;--green-bg:rgba(74,222,128,.08);
+  --red:#f87171;--orange:#fb923c;--yellow:#facc15;--blue:#60a5fa;
+  --accent:#4ade80;
+  --font-sans:'Inter',system-ui,-apple-system,sans-serif;
+  --font-mono:'JetBrains Mono','Fira Code',monospace;
+  --radius:8px;--radius-lg:12px;
+}
+html{font-size:15px;scroll-behavior:smooth}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);min-height:100vh;line-height:1.6}
+
+/* ─── Header ─── */
+.header{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1.5rem;border-bottom:1px solid var(--border);background:#1e1e1e;position:sticky;top:0;z-index:100;backdrop-filter:blur(12px)}
+.header-left{display:flex;align-items:center;gap:.75rem}
+.logo{font-family:var(--font-mono);font-weight:700;font-size:1rem;letter-spacing:.08em;color:var(--text-bright)}
+.badge{font-size:.65rem;font-weight:600;padding:.2rem .55rem;border-radius:20px;background:var(--green-bg);color:var(--green);border:1px solid rgba(74,222,128,.25);letter-spacing:.03em}
+.header-links{display:flex;gap:.25rem}
+.header-links a{font-size:.8rem;color:var(--text-dim);text-decoration:none;padding:.4rem .7rem;border-radius:6px;transition:all .15s}
+.header-links a:hover{color:var(--text-bright);background:var(--bg-hover)}
+
+/* ─── Hero ─── */
+.hero{padding:2rem 1.5rem 1.25rem;border-bottom:1px solid var(--border)}
+.hero h1{font-size:1.65rem;font-weight:700;color:var(--text-bright);margin-bottom:.35rem}
+.hero p{color:var(--text-dim);font-size:.88rem;max-width:52rem;line-height:1.5}
+
+/* ─── Main Grid ─── */
+.main{display:grid;grid-template-columns:1fr 280px;gap:0;min-height:420px}
+
+/* ─── Console ─── */
+.console-wrap{padding:1.25rem 1.5rem;border-right:1px solid var(--border)}
+.section-title{display:flex;align-items:center;gap:.5rem;font-size:.8rem;font-weight:600;color:var(--text-dim);margin-bottom:.75rem;text-transform:uppercase;letter-spacing:.06em}
+.section-title .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green)}
+#console{
+  background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);
+  padding:1rem;font-family:var(--font-mono);font-size:.78rem;line-height:1.7;
+  color:var(--text-dim);min-height:200px;max-height:340px;overflow-y:auto;
+  white-space:pre-wrap;word-break:break-word;
+}
+#console .log-system{color:var(--text-dim)}
+#console .log-info{color:var(--blue)}
+#console .log-success{color:var(--green)}
+#console .log-error{color:var(--red)}
+#console .log-reward{color:var(--yellow)}
+#console .log-step{color:var(--orange)}
+
+/* ─── Metrics Panel ─── */
+.metrics-wrap{padding:1.25rem 1.25rem;background:var(--bg-card)}
+.metric-card{background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:.7rem .85rem;margin-bottom:.6rem}
+.metric-label{font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.15rem}
+.metric-value{font-size:1.25rem;font-weight:700;color:var(--text-bright);font-family:var(--font-mono)}
+.metric-value.none{color:var(--text-dim)}
+.status-row{display:flex;align-items:center;gap:.5rem;margin-top:.75rem;padding:.5rem .85rem;border-radius:var(--radius);background:var(--bg-input);border:1px solid var(--border)}
+.status-dot{width:8px;height:8px;border-radius:50%;transition:background .3s,box-shadow .3s}
+.status-dot.active{background:var(--green);box-shadow:0 0 8px var(--green)}
+.status-dot.idle{background:var(--text-dim)}
+.status-text{font-size:.78rem;color:var(--text-dim)}
+
+/* ─── Buttons ─── */
+.actions{padding:1rem 1.5rem;border-top:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:.5rem}
+.btn{
+  font-family:var(--font-sans);font-size:.82rem;font-weight:600;
+  padding:.55rem 1.1rem;border-radius:var(--radius);border:1px solid var(--border);
+  background:var(--bg-card);color:var(--text);cursor:pointer;transition:all .15s;
+  display:inline-flex;align-items:center;gap:.4rem;
+}
+.btn:hover{background:var(--bg-hover);border-color:var(--border-light);color:var(--text-bright)}
+.btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-primary{background:rgba(74,222,128,.1);border-color:rgba(74,222,128,.25);color:var(--green)}
+.btn-primary:hover{background:rgba(74,222,128,.18);border-color:rgba(74,222,128,.4)}
+.btn.loading::after{content:'';width:12px;height:12px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin .6s linear infinite;margin-left:.3rem}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ─── Schema ─── */
+.schema{padding:1.25rem 1.5rem}
+.schema h3{font-size:.85rem;font-weight:600;color:var(--text-bright);margin-bottom:.75rem}
+.endpoint-list{list-style:none}
+.endpoint{display:flex;align-items:center;justify-content:space-between;padding:.45rem 0;border-bottom:1px solid rgba(51,51,51,.5)}
+.endpoint:last-child{border-bottom:none}
+.endpoint-left{display:flex;align-items:center;gap:.6rem}
+.method{font-family:var(--font-mono);font-size:.65rem;font-weight:700;padding:.15rem .45rem;border-radius:4px;min-width:38px;text-align:center}
+.method.post{background:rgba(74,222,128,.12);color:var(--green)}
+.method.get{background:rgba(96,165,250,.12);color:var(--blue)}
+.path{font-family:var(--font-mono);font-size:.8rem;color:var(--text)}
+.endpoint-desc{font-size:.75rem;color:var(--text-dim)}
+
+/* ─── Footer ─── */
+.footer{display:flex;justify-content:space-between;align-items:center;padding:.75rem 1.5rem;border-top:1px solid var(--border);font-size:.72rem;color:var(--text-dim)}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#444;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#555}
+
+/* ─── Toast ─── */
+.toast{position:fixed;bottom:1.5rem;right:1.5rem;padding:.65rem 1rem;border-radius:var(--radius);font-size:.8rem;color:var(--text-bright);z-index:200;animation:slideUp .3s ease;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.toast.success{background:#166534;border:1px solid var(--green)}
+.toast.error{background:#7f1d1d;border:1px solid var(--red)}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* ─── Responsive ─── */
+@media(max-width:768px){
+  .main{grid-template-columns:1fr}
+  .console-wrap{border-right:none;border-bottom:1px solid var(--border);padding:1rem}
+  .metrics-wrap{padding:1rem}
+  .metric-card{padding:.6rem .75rem;margin-bottom:.5rem}
+  .metric-value{font-size:1.1rem}
+  .footer{flex-direction:column;gap:.3rem;text-align:center}
+  .actions{justify-content:center;padding:.75rem 1rem}
+  .hero{padding:1.5rem 1rem 1rem}
+  .hero h1{font-size:1.3rem}
+  .hero p{font-size:.82rem}
+  .header{padding:.6rem 1rem}
+  .header-links a{font-size:.72rem;padding:.35rem .5rem}
+  .logo{font-size:.9rem}
+  .schema{padding:1rem}
+  .schema h3{font-size:.8rem}
+  #console{min-height:160px;max-height:260px;font-size:.72rem;padding:.75rem}
+  .btn{font-size:.75rem;padding:.45rem .85rem}
+}
+@media(max-width:480px){
+  .header{flex-direction:column;gap:.5rem;padding:.6rem .75rem}
+  .header-left{width:100%;justify-content:center}
+  .header-links{width:100%;justify-content:center;flex-wrap:wrap}
+  .hero h1{font-size:1.15rem}
+  .actions{gap:.4rem}
+  .btn{font-size:.7rem;padding:.4rem .7rem}
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header" id="app-header">
+  <div class="header-left">
+    <span class="logo">OPENENV</span>
+    <span class="badge">Compliant v1.0</span>
+  </div>
+  <nav class="header-links">
+    <a href="/docs" target="_blank" id="link-docs">API Docs</a>
+    <a href="/health" target="_blank" id="link-health">Health</a>
+    <a href="https://github.com/ronbell1/meta_scaler" target="_blank" rel="noopener" id="link-github">GitHub</a>
+  </nav>
+</header>
+
+<!-- Hero -->
+<section class="hero" id="hero-section">
+  <h1>Procurement Contract Auditor</h1>
+  <p>A multi-step RL sandbox for deterministic contract anomaly detection — policy violation analysis, severity grading, and redline generation for legal ops evaluation.</p>
+</section>
+
+<!-- Main: Console + Metrics -->
+<div class="main" id="main-content">
+  <!-- Console -->
+  <div class="console-wrap">
+    <div class="section-title"><span class="dot"></span> Evaluation Console</div>
+    <div id="console"><span class="log-system">&gt; System initialized. Environment ready.
+&gt; Policy rulebook loaded — 30 rules across 6 categories.
+&gt; Select a difficulty to inject a contract scenario.</span></div>
+  </div>
+  <!-- Metrics -->
+  <div class="metrics-wrap">
+    <div class="section-title">Environment Metrics</div>
+    <div class="metric-card">
+      <div class="metric-label">Current Task</div>
+      <div class="metric-value none" id="m-task">None</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Step Count</div>
+      <div class="metric-value" id="m-steps">0 / 0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Cumulative Reward</div>
+      <div class="metric-value" id="m-reward">0.00</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Violations Found</div>
+      <div class="metric-value" id="m-violations">0</div>
+    </div>
+    <div class="status-row">
+      <span class="status-dot idle" id="status-dot"></span>
+      <span class="status-text" id="status-text">Environment Idle</span>
+    </div>
+  </div>
+</div>
+
+<!-- Action Buttons -->
+<div class="actions" id="actions-bar">
+  <button class="btn btn-primary" id="btn-step" disabled onclick="doStep()">Step</button>
+  <button class="btn" id="btn-easy" onclick="doReset('easy')">Audit Easy Contract</button>
+  <button class="btn" id="btn-medium" onclick="doReset('medium')">Audit Medium Contract</button>
+  <button class="btn" id="btn-hard" onclick="doReset('hard')">Audit Hard Package</button>
+</div>
+
+<!-- Core Schema -->
+<section class="schema" id="schema-section">
+  <h3>Core Schema</h3>
+  <ul class="endpoint-list">
+    <li class="endpoint"><span class="endpoint-left"><span class="method post">POST</span><span class="path">/reset</span></span><span class="endpoint-desc">Initialize environment</span></li>
+    <li class="endpoint"><span class="endpoint-left"><span class="method post">POST</span><span class="path">/step</span></span><span class="endpoint-desc">Execute audit action</span></li>
+    <li class="endpoint"><span class="endpoint-left"><span class="method get">GET</span><span class="path">/state</span></span><span class="endpoint-desc">Observability</span></li>
+    <li class="endpoint"><span class="endpoint-left"><span class="method get">GET</span><span class="path">/tasks</span></span><span class="endpoint-desc">List tasks</span></li>
+    <li class="endpoint"><span class="endpoint-left"><span class="method post">POST</span><span class="path">/submit</span></span><span class="endpoint-desc">Submit custom contract</span></li>
+    <li class="endpoint"><span class="endpoint-left"><span class="method get">GET</span><span class="path">/health</span></span><span class="endpoint-desc">Service health</span></li>
+  </ul>
+</section>
+
+<!-- Footer -->
+<footer class="footer" id="app-footer">
+  <span>&copy; 2026 OpenEnv Protocol &bull; Built with FastAPI</span>
+  <span>Procurement Contract Anomaly Auditor</span>
+</footer>
+
+<script>
+const BASE = window.location.origin;
+const con = document.getElementById('console');
+let sessionId = null;
+let isDone = false;
+
+function log(msg, cls = 'log-system') {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = '\n> ' + msg;
+  con.appendChild(span);
+  con.scrollTop = con.scrollHeight;
+}
+
+function setStatus(active) {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  dot.className = 'status-dot ' + (active ? 'active' : 'idle');
+  txt.textContent = active ? 'Environment Active' : 'Environment Idle';
+}
+
+function updateMetrics(data) {
+  const task = document.getElementById('m-task');
+  const steps = document.getElementById('m-steps');
+  const reward = document.getElementById('m-reward');
+  const violations = document.getElementById('m-violations');
+
+  if (data.task_id) {
+    task.textContent = data.task_id.charAt(0).toUpperCase() + data.task_id.slice(1);
+    task.classList.remove('none');
+  }
+  if (data.step !== undefined && data.max_steps !== undefined) {
+    steps.textContent = data.step + ' / ' + data.max_steps;
+  }
+  if (data.cumulative_reward !== undefined) {
+    reward.textContent = parseFloat(data.cumulative_reward).toFixed(2);
+  }
+  if (data.violations_count !== undefined) {
+    violations.textContent = data.violations_count;
+  }
+}
+
+function setLoading(btn, loading) {
+  if (loading) {
+    btn.classList.add('loading');
+    btn.disabled = true;
+  } else {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+function toast(msg, type = 'success') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+async function doReset(taskId) {
+  const btn = event.target;
+  setLoading(btn, true);
+  isDone = false;
+
+  log('Resetting environment with task: ' + taskId + '...', 'log-info');
+
+  try {
+    const resp = await fetch(BASE + '/dashboard/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId })
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      log('ERROR: ' + data.error, 'log-error');
+      toast(data.error, 'error');
+      return;
+    }
+
+    sessionId = data.session_id;
+    log('Contract loaded — ' + data.task_id + ' difficulty', 'log-success');
+    log('Rules to check: ' + data.rules_count, 'log-system');
+    log('Max steps: ' + data.max_steps, 'log-system');
+    log('Contract length: ' + data.contract_length + ' chars', 'log-system');
+
+    updateMetrics({
+      task_id: data.task_id,
+      step: 0,
+      max_steps: data.max_steps,
+      cumulative_reward: 0,
+      violations_count: 0,
+    });
+    setStatus(true);
+    document.getElementById('btn-step').disabled = false;
+    toast('Environment reset — ' + taskId + ' task loaded');
+
+  } catch (e) {
+    log('Network error: ' + e.message, 'log-error');
+    toast('Connection failed', 'error');
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+async function doStep() {
+  if (!sessionId || isDone) return;
+  const btn = document.getElementById('btn-step');
+  setLoading(btn, true);
+
+  log('Executing step...', 'log-step');
+
+  try {
+    const resp = await fetch(BASE + '/dashboard/step', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId })
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      log('ERROR: ' + data.error, 'log-error');
+      return;
+    }
+
+    log('Step ' + data.step + ': reward=' + parseFloat(data.reward).toFixed(4) +
+        '  violations=' + data.violations_count +
+        (data.done ? '  [DONE]' : ''), data.reward > 0 ? 'log-reward' : 'log-system');
+
+    if (data.feedback) {
+      log('Feedback: ' + data.feedback, 'log-info');
+    }
+
+    updateMetrics({
+      task_id: data.task_id,
+      step: data.step,
+      max_steps: data.max_steps,
+      cumulative_reward: data.cumulative_reward,
+      violations_count: data.violations_count,
+    });
+
+    if (data.done) {
+      isDone = true;
+      log('Episode complete. Final score: ' + parseFloat(data.cumulative_reward).toFixed(4), 'log-success');
+      btn.disabled = true;
+      setStatus(false);
+      toast('Episode complete — score: ' + parseFloat(data.cumulative_reward).toFixed(4));
+    }
+
+  } catch (e) {
+    log('Network error: ' + e.message, 'log-error');
+  } finally {
+    if (!isDone) setLoading(btn, false);
+  }
+}
+</script>
+</body>
+</html>

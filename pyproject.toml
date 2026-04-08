@@ -35,6 +35,7 @@ packages = ["server"]
 [tool.hatch.build.targets.sdist]
 include = [
     "server/**",
+    "server/static/**",
     "models.py",
     "client.py",
     "my_env.py",

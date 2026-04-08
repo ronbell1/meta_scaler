@@ -60,33 +60,19 @@ def check_liability_cap(text: str) -> bool:
     """RULE_01: Liability cap must be >= 2x annual contract value."""
     if not _has_clause(text, r"liability.*cap|cap.*liability|limited to fees|total liability"):
         return False
+    # Check for explicit month-based caps (e.g. "preceding 6 months")
     cap_months = _extract_days(text, r"(?:preceding|past|previous)\s+(\d+)\s+month")
     if cap_months is not None and cap_months < 24:
         return True
-    m = re.search(r"preceding\s+(?:six|three)\s*\(?(\d+)\)?\s*months?", text, re.IGNORECASE)
+    # Check for written-out month references (e.g. "preceding six (6) months")
+    m = re.search(r"preceding\s+(?:six|three|twelve)\s*\(?\s*(\d+)\s*\)?\s*months?", text, re.IGNORECASE)
     if m:
-        return int(m.group(1)) < 24
-    if _has_clause(text, r"liability.*unlimited|no.*cap|not.*limited", re.IGNORECASE):
-        return False
-    return False
-    cap_months = _extract_days(text, r"(?:preceding|past|previous)\s+(\d+)\s+month")
-    if cap_months is not None and cap_months < 24:
-        return True
-    m = re.search(r"preceding\s+(?:six|three)\s*\(?(\d+)\)?\s*months?", text, re.IGNORECASE)
-    if m:
-        return True
-    m = re.search(r"preceding\s+six\s+\(6\)\s+months", text, re.IGNORECASE)
-    if m:
-        return True
-    if _has_clause(text, r"liability.*unlimited|no.*cap|not.*limited", re.IGNORECASE):
-        return False
-    return False
-    cap_months = _extract_days(text, r"(?:preceding|past|previous)\s+(\d+)\s+month")
-    if cap_months is not None and cap_months < 24:
-        return True
-    m = re.search(r"preceding\s+(?:six|three)\s*\(?(\d+)\)?\s*months?", text, re.IGNORECASE)
-    if m:
-        return True
+        try:
+            months = int(m.group(1))
+            return months < 24
+        except (IndexError, ValueError):
+            return True  # If it mentions "six" or "three" months, it's likely a violation
+    # Check for unlimited liability (not a violation for this rule)
     if _has_clause(text, r"liability.*unlimited|no.*cap|not.*limited", re.IGNORECASE):
         return False
     return False
@@ -98,7 +84,7 @@ def check_payment_terms(text: str) -> bool:
     if m:
         days = int(m.group(1))
         return days < 60
-    m = re.search(r"within\s+(?:thirty|forty|fifty)\s*\(?(\d+)\)?\s*days?", text, re.IGNORECASE)
+    m = re.search(r"within\s+(?:thirty|forty|fifty)\s*\(?\s*(\d+)\s*\)?\s*days?", text, re.IGNORECASE)
     if m:
         days = int(m.group(1))
         return days < 60
@@ -117,15 +103,6 @@ def check_auto_renewal(text: str) -> bool:
     if m:
         days = int(m.group(1))
         return days < 90
-    m = re.search(r"(\d+)\s*days?\s*(?:prior\s+)?(?:written\s+)?notice", text, re.IGNORECASE)
-    if m:
-        days = int(m.group(1))
-        return days < 90
-    m = re.search(r"(?:terminated|notice).*?(\d+)\s*days?", text, re.IGNORECASE)
-    if m:
-        days = int(m.group(1))
-        return days < 90
-    return False
     m = re.search(r"(\d+)\s*days?\s*(?:prior\s+)?(?:written\s+)?notice", text, re.IGNORECASE)
     if m:
         days = int(m.group(1))
@@ -174,6 +151,9 @@ def check_mutual_indemnification(text: str) -> bool:
         return True
     if _has_clause(text, r"indemnif.*(?:vendor|supplier|contractor).*negligence"):
         return True
+    # Check for explicit "no reciprocal" language
+    if _has_clause(text, r"no\s+reciprocal\s+indemnif|vendor\s+provides\s+no\s+indemnif"):
+        return True
     return False
 
 
@@ -214,7 +194,7 @@ def check_limitation_of_liability(text: str) -> bool:
     """RULE_09: Limitation of liability clause must be present."""
     if _has_clause(
         text,
-        r"no\s+limitation\s+of\s+liability\s+clause|liability\s+is\s+capped\s+or\s+limited\s+in\s+any\s+way",
+        r"no\s+limitation\s+of\s+liability\s+clause|liability\s+is\s+capped\s+or\s+limited\s+in\s+any\s+way|no\s+limitation\s+of\s+liability",
     ):
         return True
     if not _has_clause(
@@ -248,13 +228,10 @@ def check_warranty_period(text: str) -> bool:
     if months is not None:
         if months < 12:
             return True
-    if _has_clause(text, r"warranty.*(?:not\s+provided|no\s+warranty|warranty\s+not\s+defined)"):
+    # Also check for broader pattern
+    months2 = _extract_number(text, r"warrant.*?(\d+)\s*(?:month|year)")
+    if months2 is not None and months2 < 12:
         return True
-    return False
-    months = _extract_number(text, r"warrant.*?(\d+)\s*(?:month|year)")
-    if months is not None:
-        if months < 12:
-            return True
     if _has_clause(text, r"warranty.*(?:not\s+provided|no\s+warranty|warranty\s+not\s+defined)"):
         return True
     return False
@@ -278,27 +255,22 @@ def check_late_payment_penalty(text: str) -> bool:
     """RULE_13: Late payment penalty clause required."""
     if not _has_clause(text, r"(?:payment|pay|invoice)"):
         return False
+    # Check for explicit late payment penalty presence
     if _has_clause(
         text,
         r"late\s+payments?\s+shall\s+accrue\s+interest|late\s+payments?\s+incur\s+interest|overdue\s+amounts?\s+bear\s+interest|late\s+payment\s+penalty",
     ):
         return False
+    # Check for explicit "no penalty" language
     if _has_clause(
         text, r"no\s+penalty|no\s+late\s+fee|late\s+payments?\s+incur\s+no\s+penalty|no\s+late\s+payment\s+penalty"
     ):
         return True
+    # Check for absence of any late payment penalty
     if not _has_clause(
         text,
         r"late.*penalty|penalty.*late|interest.*late|late.*fee|late.*charge|overdue.*interest",
     ):
-        return True
-    return False
-    if not _has_clause(
-        text,
-        r"late.*penalty|penalty.*late|interest.*late|late.*fee|late.*charge|overdue.*interest",
-    ):
-        return True
-    if _has_clause(text, r"no\s+penalty|no\s+late\s+fee|late\s+payments?\s+incur\s+no\s+penalty"):
         return True
     return False
 
@@ -356,7 +328,7 @@ def check_consequential_damages(text: str) -> bool:
         return True
     if _has_clause(
         text,
-        r"(?:vendor|supplier|contractor).*(?:exclude|exclude|except).*(?:consequential|indirect)",
+        r"(?:vendor|supplier|contractor).*(?:exclude|except).*(?:consequential|indirect)",
     ) and not _has_clause(
         text,
         r"(?:client|company|buyer).*(?:exclude|except).*(?:consequential|indirect)",
@@ -386,20 +358,14 @@ def check_sla_penalties(text: str) -> bool:
     """RULE_19: SLA breach penalties/credits required."""
     if not _has_clause(text, r"(?:sla|uptime|availability|service\s+level)"):
         return False
+    # Check for explicit "no penalties" language
     if _has_clause(
         text,
-        r"no\s+(?:credits|penalties|remedies)|no\s+financial\s+penalty|penalties?.*not\s+defined|no\s+service\s+credits|no\s+remedies\s+are\s+defined",
+        r"no\s+(?:credits|penalties|remedies)|no\s+financial\s+penalty|penalties?\s*(?:are\s+)?not\s+defined|no\s+service\s+credits|no\s+remedies\s+are\s+defined",
     ):
         return True
+    # Check for total absence of penalty/credit provisions
     if not _has_clause(text, r"(?:credit|penalty|remedy|remedies|service\s+credit|financial)"):
-        return True
-    return False
-    if not _has_clause(text, r"(?:credit|penalty|remedy|remedies|service\s+credit|financial)"):
-        return True
-    if _has_clause(
-        text,
-        r"no\s+(?:credits|penalties|remedies)|no\s+financial\s+penalty|penalties?.*not\s+defined",
-    ):
         return True
     return False
 
@@ -430,6 +396,7 @@ def check_escalation_clause(text: str) -> bool:
     """RULE_22: Dispute escalation to senior management before litigation."""
     if not _has_clause(text, r"dispute|escalat"):
         return False
+    # Check for explicit escalation procedures
     if _has_clause(
         text,
         r"(?:first\s+be\s+submitted|escalat|senior\s+management|executive).*(?:negotiation|good-faith\s+negotiation).*(?:before\s+pursuing|before\s+litigation|before\s+arbitration|before\s+court)",
@@ -440,25 +407,18 @@ def check_escalation_clause(text: str) -> bool:
         r"(?:escalat|senior\s+management|executive|negotiation)\s+before|before\s+(?:litigation|arbitration|court)",
     ):
         return False
+    # No escalation found — violation
     return True
-    if not _has_clause(
-        text,
-        r"(?:escalat|senior\s+management|executive|negotiation)\s+before|before\s+(?:litigation|arbitration|court)",
-    ):
-        return True
-    return False
 
 
 def check_force_majeure(text: str) -> bool:
     """RULE_23: Force majeure clause must be present."""
-    if _has_clause(
-        text,
-        r"no\s+force\s+majeure\s+clause|force\s+majeure\s+clause\s+is\s+not\s+included|force\s+majeure\s+clause\s+is\s+included",
-    ):
-        if _has_clause(text, r"no\s+force\s+majeure\s+clause|force\s+majeure\s+clause\s+is\s+not\s+included"):
-            return True
-        if _has_clause(text, r"force\s+majeure\s+clause\s+is\s+included"):
-            return False
+    # Check for explicit "no force majeure" language
+    if _has_clause(text, r"no\s+force\s+majeure\s+clause|force\s+majeure\s+clause\s+is\s+not\s+included"):
+        return True
+    if _has_clause(text, r"force\s+majeure\s+clause\s+is\s+included"):
+        return False
+    # Check for any force majeure language
     if not _has_clause(
         text,
         r"force\s+majeure|act\s+of\s+god|unforeseeable|impossibility\s+of\s+performance|causes\s+beyond\s+its\s+reasonable\s+control",
@@ -485,19 +445,14 @@ def check_audit_rights(text: str) -> bool:
     """RULE_25: Client must have audit rights over vendor."""
     if not _has_clause(text, r"(?:client|company|buyer)"):
         return False
+    # Check for explicit "no audit rights" language
     if _has_clause(text, r"no\s+audit\s+right|audit\s+not\s+permitted|audit\s+rights.*not\s+granted"):
         return True
+    # Check for presence of audit rights
     if _has_clause(text, r"(?:audit|inspect|examine).*(?:right|access|upon\s+request)"):
         return False
+    # No audit right provisions found — violation
     return True
-    if not _has_clause(text, r"(?:audit|inspect|examine).*(?:right|access|upon\s+request)"):
-        return True
-    if _has_clause(
-        text,
-        r"no\s+audit\s+right|audit\s+not\s+permitted|audit\s+rights.*not\s+granted",
-    ):
-        return True
-    return False
 
 
 def check_insurance_requirements(text: str) -> bool:
@@ -535,9 +490,6 @@ def check_subcontractor_approval(text: str) -> bool:
         r"may\s+engage\s+subcontractors.*without\s+(?:client's\s+)?consent|may\s+assign.*without\s+consent|without\s+client's\s+consent\s+or\s+notification",
     ):
         return True
-    if not _has_clause(text, r"subcontract.*(?:consent|approval|written\s+consent|prior\s+approval)"):
-        return True
-    return False
     if not _has_clause(text, r"subcontract.*(?:consent|approval|written\s+consent|prior\s+approval)"):
         return True
     return False

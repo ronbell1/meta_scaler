@@ -136,6 +136,30 @@ COMPLIANT_CLAUSE_TEMPLATES = {
         "Fees are denominated in USD. Both parties share currency exchange risk. Price adjustments apply if the exchange rate moves more than 5% from the rate at execution.",
         "Payment currency is USD. Exchange rate risk above a 5% threshold from the baseline shall be shared equally by both parties.",
     ],
+    "escalation_clause": [
+        "All disputes shall first be escalated to senior management of both parties for resolution through good-faith negotiation before pursuing formal arbitration or litigation.",
+        "Prior to initiating arbitration or court proceedings, the parties shall escalate the dispute to their respective senior executives for resolution within 30 days.",
+    ],
+    "late_payment_penalty": [
+        "Late payments shall accrue interest at 1.5% per month or the maximum rate permitted by law, whichever is lesser.",
+        "Overdue invoices bear interest at a rate of 1% per month. Vendor may also suspend services after 30 days of non-payment.",
+    ],
+    "currency_risk": [
+        "All amounts are in USD. Currency fluctuation risk shall be shared equally between the parties. If exchange rate variation exceeds 5% from the baseline rate, the parties shall negotiate in good faith to adjust pricing.",
+        "Fees are denominated in USD. Both parties share currency exchange risk. Price adjustments apply if the exchange rate moves more than 5% from the rate at execution.",
+    ],
+    "sla_penalties": [
+        "Failure to meet the uptime SLA shall result in service credits of 5% of monthly fees per 0.1% shortfall, up to a maximum of 30% of monthly fees.",
+        "Service credits apply for SLA breaches: 10% of monthly fees for each hour of unscheduled downtime exceeding the permitted maintenance window.",
+    ],
+    "limitation_of_liability": [
+        "Each party's total aggregate liability under this agreement shall not exceed two times (2x) the annual contract value paid or payable in the twelve (12) months preceding the claim.",
+        "Neither party's liability shall exceed twice the fees paid by Client in the twelve-month period immediately before the event giving rise to liability.",
+    ],
+    "data_breach_indemnity": [
+        "Each party shall indemnify the other against claims arising from data breaches caused by that party's negligence or willful misconduct, including costs of notification and credit monitoring.",
+        "Vendor shall indemnify Client against any losses arising from a data breach or security incident caused by Vendor's failure to implement adequate security measures.",
+    ],
 }
 
 
@@ -270,16 +294,25 @@ CONTRACT_STRUCTURES = {
                 'Vendor agrees to provide the services described in each Statement of Work ("SOW") executed under this Agreement. Each SOW shall reference this Agreement and is subject to its terms.',
             ),
             ("PAYMENT TERMS", "{payment_terms}"),
+            ("LATE PAYMENT", "{late_payment_penalty}"),
+            ("CURRENCY", "{currency_risk}"),
             ("TERM AND RENEWAL", "{auto_renewal}"),
             ("INTELLECTUAL PROPERTY", "{ip_ownership}"),
+            ("BACKGROUND IP", "{background_ip}"),
             ("CONFIDENTIALITY", "{confidentiality}"),
-            ("LIMITATION OF LIABILITY", "{liability_cap}"),
+            ("LIMITATION OF LIABILITY", "{limitation_of_liability}"),
+            ("LIABILITY CAP", "{liability_cap}"),
+            ("CONSEQUENTIAL DAMAGES", "{consequential_damages}"),
             ("INDEMNIFICATION", "{indemnification}"),
+            ("DATA BREACH INDEMNITY", "{data_breach_indemnity}"),
             ("DATA PROTECTION", "{data_privacy}"),
             ("SERVICE LEVELS", "{sla_uptime}"),
+            ("SLA PENALTIES", "{sla_penalties}"),
+            ("SUSPENSION", "{suspension}"),
             ("WARRANTY", "{warranty}"),
             ("TERMINATION", "{termination}"),
             ("DISPUTE RESOLUTION", "{dispute_resolution}"),
+            ("DISPUTE ESCALATION", "{escalation_clause}"),
             ("FORCE MAJEURE", "{force_majeure}"),
             ("ASSIGNMENT", "{assignment}"),
             ("AUDIT RIGHTS", "{audit_rights}"),
@@ -555,6 +588,7 @@ class ContractGenerator:
         return contract_text, violations
 
     def _rule_maps_to_clause(self, rule_id: str, clause_key: str) -> bool:
+        """Map each rule to its OWN unique clause key to avoid overwrites."""
         mapping = {
             "RULE_01": "liability_cap",
             "RULE_02": "payment_terms",
@@ -564,20 +598,20 @@ class ContractGenerator:
             "RULE_06": "indemnification",
             "RULE_07": "termination",
             "RULE_08": "data_privacy",
-            "RULE_09": "liability_cap",
+            "RULE_09": "limitation_of_liability",
             "RULE_10": "sla_uptime",
             "RULE_11": "warranty",
             "RULE_12": "dispute_resolution",
-            "RULE_13": "payment_terms",
-            "RULE_14": "currency",
+            "RULE_13": "late_payment_penalty",
+            "RULE_14": "currency_risk",
             "RULE_15": "background_ip",
             "RULE_16": "liability_cap",
             "RULE_17": "consequential_damages",
-            "RULE_18": "indemnification",
-            "RULE_19": "sla_uptime",
+            "RULE_18": "data_breach_indemnity",
+            "RULE_19": "sla_penalties",
             "RULE_20": "suspension",
             "RULE_21": "confidentiality",
-            "RULE_22": "dispute_resolution",
+            "RULE_22": "escalation_clause",
             "RULE_23": "force_majeure",
             "RULE_24": "assignment",
             "RULE_25": "audit_rights",

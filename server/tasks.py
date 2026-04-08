@@ -96,7 +96,7 @@ TASKS: Dict[str, TaskConfig] = {
             "lawyer-written gold redline."
         ),
         contract_type="MSA",
-        violations=["RULE_01", "RULE_06", "RULE_09"],
+        violations=["RULE_01", "RULE_06", "RULE_07", "RULE_08", "RULE_09", "RULE_11"],
         cross_doc_violations=[
             ("MSA", "DPA", "RULE_18"),
         ],

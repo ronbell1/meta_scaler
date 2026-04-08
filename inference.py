@@ -24,9 +24,11 @@ STDOUT FORMAT
     - All fields on a single line with no newlines within a line.
 """
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import asyncio
 import json
@@ -222,72 +224,84 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
     print("\n===== USER PROMPT =====")
     print(user_prompt[:500] + "..." if len(user_prompt) > 500 else user_prompt)
 
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-        )
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"\n--- LLM call attempt {attempt}/{max_retries} ---")
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+            )
 
-        text = (completion.choices[0].message.content or "").strip()
+            text = (completion.choices[0].message.content or "").strip()
 
-        print("\n===== RAW MODEL OUTPUT =====")
-        print(text)
+            print("\n===== RAW MODEL OUTPUT =====")
+            print(text)
 
-        raw = extract_json_from_text(text)
-        if raw is None:
-            print("JSON EXTRACTION FAILED - no valid JSON found in output")
-            return []
+            raw = extract_json_from_text(text)
+            if raw is None:
+                print("JSON EXTRACTION FAILED - no valid JSON found in output")
+                return []
 
-        print("PARSED:", raw)
+            print("PARSED:", raw)
 
-        violations = []
-        valid_rule_ids = set()
-        for rule in rules_to_check:
-            rule_id = rule.split(":")[0].strip()
-            valid_rule_ids.add(rule_id)
+            violations = []
+            valid_rule_ids = set()
+            for rule in rules_to_check:
+                rule_id = rule.split(":")[0].strip()
+                valid_rule_ids.add(rule_id)
 
-        for item in raw:
-            try:
-                normalized = {}
-                normalized["rule_id"] = item.get("rule_id", "UNKNOWN")
-                normalized["description"] = item.get("description", item.get("reasoning", ""))
-                normalized["severity"] = item.get("severity", "medium").lower()
-                normalized["clause_reference"] = item.get("clause_reference", item.get("section", None))
+            for item in raw:
+                try:
+                    normalized = {}
+                    normalized["rule_id"] = item.get("rule_id", "UNKNOWN")
+                    normalized["description"] = item.get("description", item.get("reasoning", ""))
+                    normalized["severity"] = item.get("severity", "medium").lower()
+                    normalized["clause_reference"] = item.get("clause_reference", item.get("section", None))
 
-                if normalized["severity"] not in ("critical", "high", "medium", "low"):
-                    normalized["severity"] = "medium"
+                    if normalized["severity"] not in ("critical", "high", "medium", "low"):
+                        normalized["severity"] = "medium"
 
-                violation = PolicyViolation.model_validate(normalized)
+                    violation = PolicyViolation.model_validate(normalized)
 
-                if violation.rule_id in valid_rule_ids:
-                    violations.append(violation)
-                else:
-                    print(f"Skipping unknown rule_id: {violation.rule_id} (valid: {valid_rule_ids})")
+                    if violation.rule_id in valid_rule_ids:
+                        violations.append(violation)
+                    else:
+                        print(f"Skipping unknown rule_id: {violation.rule_id} (valid: {valid_rule_ids})")
 
-            except Exception as e:
-                print(f"VALIDATION ERROR: {e}")
+                except Exception as e:
+                    print(f"VALIDATION ERROR: {e}")
 
-        print(f"FINAL: {len(violations)} violations (from {len(raw)} raw items)")
-        for v in violations:
-            print(f"  - {v.rule_id}: {v.description[:80]}... [{v.severity}]")
+            print(f"FINAL: {len(violations)} violations (from {len(raw)} raw items)")
+            for v in violations:
+                print(f"  - {v.rule_id}: {v.description[:80]}... [{v.severity}]")
 
-        return violations
+            return violations
 
-    except Exception as e:
-        print(f"LLM ERROR: {e}")
-        return []
+        except Exception as e:
+            print(f"LLM ERROR (attempt {attempt}/{max_retries}): {type(e).__name__}: {e}")
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                print("All retries exhausted.")
+                return []
 
 
 async def run_task(task_id: str):
     """Run a single task and return results."""
-    client = OpenAI(base_url=os.environ["API_BASE_URL"], api_key=os.environ["HF_TOKEN"])
-
-    image_name = os.environ.get("LOCAL_IMAGE_NAME", "procurement-contract-env")
+    client = OpenAI(
+        base_url=os.environ["API_BASE_URL"],
+        api_key=os.environ["HF_TOKEN"],
+        timeout=60.0,
+    )
+    image_name = os.environ.get("LOCAL_IMAGE_NAME", "my-env")
 
     log_start(task_id, BENCHMARK, MODEL_NAME)
 

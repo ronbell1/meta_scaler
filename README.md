@@ -241,6 +241,51 @@ MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
 HF_TOKEN=<your_token>
 ```
 
+## Hugging Face Spaces Deployment
+
+### Deploy to HF Spaces
+
+```bash
+# Login to Hugging Face
+huggingface-cli login
+
+# Push to HF Spaces (creates new space if needed)
+openenv push --space_name procurement-contract-audit
+```
+
+### HF Spaces URL
+
+**Your deployment URL:** `https://your-username-procurement-contract-audit.hf.space`
+
+After deployment, verify the space is running:
+
+```bash
+# Check health endpoint
+curl https://your-username-procurement-contract-audit.hf.space/health
+
+# Test reset endpoint
+curl -X POST https://your-username-procurement-contract-audit.hf.space/reset -H "Content-Type: application/json" -d '{"task_id": "easy"}'
+```
+
+### User Input Example
+
+Users can submit custom contracts for analysis:
+
+```bash
+curl -X POST "https://your-username-procurement-contract-audit.hf.space/submit" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contract_text": "Client shall pay all invoices within thirty (30) days...",
+    "task_id": "easy"
+  }'
+```
+
+Response includes:
+- `final_score`: 0.0-1.0 reward score
+- `violations_found`: List of detected policy violations
+- `gold_violations`: Expected violations for comparison
+- `feedback`: Grader feedback on accuracy
+
 ## Key Differentiator
 
 This environment requires **zero external infrastructure** — no K8s cluster, no real database, no external APIs. The entire reward function is deterministic Python. It runs reliably on any machine, any time, and every score is perfectly reproducible. Judges can verify results independently without any environment setup.

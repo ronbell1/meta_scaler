@@ -33,6 +33,59 @@ from .tasks import TASKS, TaskConfig, get_task
 # ─── gold violation computation ───────────────────────────────────────────
 
 
+def _get_all_violation_rule_ids(task: TaskConfig) -> List[str]:
+    """Get ALL violation rule IDs including cross-document violations."""
+    all_ids = list(task.violations)
+    for _doc_a, _doc_b, rule_id in task.cross_doc_violations:
+        if rule_id not in all_ids:
+            all_ids.append(rule_id)
+    return all_ids
+
+
+def _compute_partial_progress(
+    agent_violations: List[PolicyViolation],
+    gold_violations: Optional[List[PolicyViolation]] = None,
+) -> Dict[str, float]:
+    """Compute partial progress per rule category for incremental reward signals."""
+    if gold_violations is None:
+        gold_violations = []
+    
+    gold_by_category: Dict[str, List[str]] = {}
+    agent_by_category: Dict[str, List[str]] = {}
+    
+    for gv in gold_violations:
+        rule = RULEBOOK_BY_ID.get(gv.rule_id, None)
+        if rule:
+            category = rule.category
+            if category not in gold_by_category:
+                gold_by_category[category] = []
+            gold_by_category[category].append(gv.rule_id)
+    
+    for av in agent_violations:
+        rule = RULEBOOK_BY_ID.get(av.rule_id, None)
+        if rule:
+            category = rule.category
+            if category not in agent_by_category:
+                agent_by_category[category] = []
+            agent_by_category[category].append(av.rule_id)
+    
+    progress = {}
+    all_categories = set(gold_by_category.keys())
+    for category in all_categories:
+        gold_count = len(gold_by_category[category])
+        agent_count = len(agent_by_category.get(category, []))
+        if gold_count > 0:
+            progress[category] = agent_count / gold_count
+        else:
+            progress[category] = 1.0
+    
+    for category in agent_by_category:
+        if category not in progress:
+            progress[category] = 1.0
+    
+    return progress
+
+
 def compute_gold_violations(
     contract_text: str,
     task: TaskConfig,
@@ -41,9 +94,13 @@ def compute_gold_violations(
 
     Since violations are injected by the generator, we trust the task config
     and validate with the policy engine as a secondary check.
+
+    Includes BOTH direct violations AND cross-document violations.
     """
     result = []
-    for rule_id in task.violations:
+    all_rule_ids = _get_all_violation_rule_ids(task)
+
+    for rule_id in all_rule_ids:
         rule = RULEBOOK_BY_ID.get(rule_id)
         if rule:
             result.append(
@@ -164,6 +221,19 @@ def score_redline(
     return min(1.0, concept_score + precision_score)
 
 
+# ─── helper to build rules_to_check ──────────────────────────────────────
+
+
+def _build_rules_to_check(task: TaskConfig) -> List[str]:
+    """Build rules_to_check list including both direct and cross-doc violations."""
+    all_rule_ids = _get_all_violation_rule_ids(task)
+    return [
+        f"{r.rule_id}: {r.description}"
+        for r in RULEBOOK
+        if r.rule_id in all_rule_ids
+    ]
+
+
 # ─── environment ──────────────────────────────────────────────────────────
 
 
@@ -190,6 +260,7 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
         seed: Optional[int] = None,
         episode_id: Optional[str] = None,
         task_id: str = "easy",
+        custom_contract: Optional[str] = None,
         **kwargs,
     ) -> Observation:
         """Load a contract + policy rulebook, return initial observation."""
@@ -200,26 +271,27 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
         self._task = get_task(task_id)
         self._generator = ContractGenerator(seed=seed or 42)
 
-        contract_text = self._generator.generate(
-            contract_type=self._task.contract_type,
-            violations=self._task.violations,
-            ambiguity_level=self._task.ambiguity_level,
-            red_herrings=self._task.red_herrings,
-        )
-        self._contract_text = contract_text
-        self._gold_violations = compute_gold_violations(contract_text, self._task)
+        if custom_contract:
+            self._contract_text = custom_contract
+            self._gold_violations = compute_gold_violations(custom_contract, self._task)
+        else:
+            contract_text = self._generator.generate(
+                contract_type=self._task.contract_type,
+                violations=self._task.violations,
+                ambiguity_level=self._task.ambiguity_level,
+                red_herrings=self._task.red_herrings,
+            )
+            self._contract_text = contract_text
+            self._gold_violations = compute_gold_violations(contract_text, self._task)
 
-        rules_to_check = [
-            f"{r.rule_id}: {r.description}"
-            for r in RULEBOOK
-            if r.rule_id in self._task.violations or r.rule_id in [cv[2] for cv in self._task.cross_doc_violations]
-        ]
+        rules_to_check = _build_rules_to_check(self._task)
 
         self._state = State(
-            episode_id=episode_id,
+            episode_id=episode_id or "",
             step_count=0,
             task_id=task_id,
-            contract_text=contract_text,
+            task_name=self._task.description[:80],
+            contract_text=self._contract_text,
             gold_violations=self._gold_violations,
             agent_violations=[],
             step=0,
@@ -231,14 +303,17 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
         )
 
         return Observation(
-            contract_text=contract_text,
+            contract_text=self._contract_text,
             task_id=task_id,
+            task_name=self._task.description[:80],
             step=0,
             last_reward=0.0,
             feedback="Review the contract and identify all policy violations.",
             rules_to_check=rules_to_check,
             reward=0.0,
             done=False,
+            user_can_submit=True,
+            partial_progress=_compute_partial_progress([], self._gold_violations),
         )
 
     def step(
@@ -273,21 +348,22 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
         s.task_metrics["current_score"] = score
         s.task_metrics["best_score"] = s.cumulative_reward
 
-        rules_to_check = [
-            f"{r.rule_id}: {r.description}"
-            for r in RULEBOOK
-            if r.rule_id in self._task.violations  # type: ignore
-        ]
+        partial_progress = _compute_partial_progress(agent_violations, self._gold_violations)
+
+        rules_to_check = _build_rules_to_check(self._task)  # type: ignore
 
         return Observation(
             contract_text=s.contract_text,
             task_id=s.task_id,
+            task_name=s.task_name,
             step=s.step,
             last_reward=reward,
             feedback=feedback,
             rules_to_check=rules_to_check,
             reward=reward,
             done=done,
+            user_can_submit=True,
+            partial_progress=partial_progress,
         )
 
     @property
