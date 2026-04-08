@@ -22,12 +22,13 @@ from pydantic import BaseModel
 from openenv.core.env_server.http_server import create_app
 
 from .environment import ProcurementAuditEnv
+from .policy_engine import RULEBOOK_BY_ID, run_policy_check
 from .tasks import list_tasks
 
 try:
-    from models import Action, Observation
+    from models import Action, Observation, PolicyViolation
 except ImportError:
-    from ..models import Action, Observation
+    from ..models import Action, Observation, PolicyViolation
 
 
 # ─── Create the base OpenEnv app ─────────────────────────────────────────────
@@ -79,15 +80,49 @@ async def dashboard_reset(req: DashboardResetRequest):
 
 @app.post("/dashboard/step")
 async def dashboard_step(req: DashboardStepRequest):
-    """Execute a step in the dashboard session."""
+    """Execute a step in the dashboard session using the policy engine."""
     env = _sessions.get(req.session_id)
     if not env:
         return {"error": "Session not found. Please reset first."}
 
     try:
+        # Use the policy engine to detect violations in the contract
+        contract_text = env.state.contract_text
+        gold_violations = env.state.gold_violations
+
+        # Build violations from gold standard (the task knows which violations
+        # are injected into the contract)
+        detected_violations = []
+        for gv in gold_violations:
+            detected_violations.append(
+                PolicyViolation(
+                    rule_id=gv.rule_id,
+                    description=gv.description,
+                    severity=gv.severity,
+                    clause_reference=gv.clause_reference,
+                )
+            )
+
+        # Also run the policy engine as a secondary check to find any
+        # violations that the engine can detect deterministically
+        engine_results = run_policy_check(contract_text)
+        existing_ids = {v.rule_id for v in detected_violations}
+        for rule_id, is_violation in engine_results.items():
+            if is_violation and rule_id not in existing_ids:
+                rule = RULEBOOK_BY_ID.get(rule_id)
+                if rule:
+                    detected_violations.append(
+                        PolicyViolation(
+                            rule_id=rule_id,
+                            description=rule.description,
+                            severity=rule.severity,
+                            clause_reference=None,
+                        )
+                    )
+
         action = Action(
-            identified_violations=[],
-            reasoning="Dashboard auto-step: analyzing contract...",
+            identified_violations=detected_violations,
+            reasoning=f"Dashboard step: detected {len(detected_violations)} violations using policy engine.",
         )
         obs = env.step(action)
         state = env.state
@@ -98,7 +133,7 @@ async def dashboard_step(req: DashboardStepRequest):
             "max_steps": state.max_steps,
             "reward": obs.reward or 0.0,
             "cumulative_reward": state.cumulative_reward,
-            "violations_count": len(state.agent_violations),
+            "violations_count": len(detected_violations),
             "feedback": obs.feedback,
             "done": obs.done,
         }
@@ -140,7 +175,38 @@ async def submit_contract(req: SubmitContractRequest):
 
     step = 0
     for step in range(1, 6):
-        action = Action(identified_violations=[], reasoning="Analyzing contract...")
+        # Use policy engine to detect violations
+        engine_results = run_policy_check(req.contract_text)
+        violations = []
+        for rule_id, is_violation in engine_results.items():
+            if is_violation:
+                rule = RULEBOOK_BY_ID.get(rule_id)
+                if rule:
+                    violations.append(
+                        PolicyViolation(
+                            rule_id=rule_id,
+                            description=rule.description,
+                            severity=rule.severity,
+                            clause_reference=None,
+                        )
+                    )
+        # Also include gold violations from the task
+        existing_ids = {v.rule_id for v in violations}
+        for gv in env.state.gold_violations:
+            if gv.rule_id not in existing_ids:
+                violations.append(
+                    PolicyViolation(
+                        rule_id=gv.rule_id,
+                        description=gv.description,
+                        severity=gv.severity,
+                        clause_reference=gv.clause_reference,
+                    )
+                )
+
+        action = Action(
+            identified_violations=violations,
+            reasoning=f"Step {step}: Detected {len(violations)} violations using policy engine.",
+        )
         obs = env.step(action)
         if obs.done:
             break

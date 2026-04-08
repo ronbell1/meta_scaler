@@ -1,0 +1,56 @@
+
+======================================================================
+TASK: easy — violations: ['RULE_02', 'RULE_03']
+======================================================================
+
+  [OK] RULE_02: Payment terms must be net-60 or better
+
+  [OK] RULE_03: Auto-renewal requires 90-day written opt-out notice
+
+======================================================================
+TASK: medium — violations: ['RULE_01', 'RULE_04', 'RULE_13', 'RULE_19', 'RULE_20']
+======================================================================
+
+  [OK] RULE_01: Liability cap must be >= 2x annual contract value
+
+  [MISSED] RULE_04: Governing law must be India or USA (not Singapore/UK)
+  === Engine didn't detect this. Searching contract for clues ===
+
+  [MISSED] RULE_13: Late payment penalty clause required
+  === Engine didn't detect this. Searching contract for clues ===
+    >> PAYMENT TERMS
+    >> All fees are payable within 60 days of invoice. Late payment penalty of 1.5% per month applies to overdue balances.
+    >> LATE PAYMENT
+    >> No late payment penalty or interest applies to overdue invoices.
+    >> Vendor hereby assigns to Client all right, title, and interest in and to any work product, deliverables, or inventions created under this Agreement.
+    >> All disputes shall first be escalated to senior management of both parties for resolution through good-faith negotiation before pursuing formal arbitration or litigation.
+    >> The provisions regarding confidentiality, indemnification, limitation of liability, intellectual property, and payment obligations shall survive termination or expiration of this Agreement.
+
+  [OK] RULE_19: SLA breach penalties/credits required
+
+  [OK] RULE_20: Vendor may not suspend service without notice
+
+======================================================================
+TASK: hard — violations: ['RULE_01', 'RULE_06', 'RULE_07', 'RULE_08', 'RULE_09', 'RULE_11']
+======================================================================
+
+  [OK] RULE_01: Liability cap must be >= 2x annual contract value
+
+  [OK] RULE_06: Indemnification must be mutual (not one-sided)
+
+  [MISSED] RULE_07: Termination for convenience: minimum 30-day notice
+  === Engine didn't detect this. Searching contract for clues ===
+    >> Automatic renewal for successive 12-month periods applies unless terminated with 90 days' written opt-out notice before the renewal date.
+    >> TERMINATION
+    >> This Agreement may be terminated by either party with fifteen (15) days' written notice.
+    >> The provisions regarding confidentiality, indemnification, limitation of liability, intellectual property, and payment obligations shall survive termination or expiration of this Agreement.
+
+  [OK] RULE_08: Data processing agreement required if PII is shared
+
+  [OK] RULE_09: Limitation of liability clause must be present
+
+  [MISSED] RULE_11: Warranty period minimum 12 months post-delivery
+  === Engine didn't detect this. Searching contract for clues ===
+    >> WARRANTY
+    >> Vendor warrants deliverables for a period of six (6) months from delivery.
+    >> Each party represents and warrants that it has not and will not offer, pay, or promise to pay anything of value to any government official in violation of the U.S. Foreign Corrupt Practices Act (FCPA) or the UK Bribery Act.
