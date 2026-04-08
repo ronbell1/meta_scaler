@@ -1,3 +1,12 @@
+---
+title: Procurement Contract Auditor
+emoji: 📑
+colorFrom: green
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
 # Procurement Contract Anomaly Auditor — OpenEnv RL Environment
 
 An RL environment simulating procurement contract review at Fortune 500 companies. The agent reads synthetic supplier contracts and must identify policy violations across 6 categories: Liability, Payment, IP, Data/Privacy, Termination, and Dispute Resolution.
