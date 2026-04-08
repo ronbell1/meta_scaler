@@ -29,6 +29,9 @@ class TaskConfig:
     max_steps: int = 5
     red_herrings: int = 0
     ambiguity_level: int = 0
+    # NOTE: reward_breakdown is informational/documentation only.
+    # Actual scoring is performed by grade_action() in environment.py
+    # using severity-weighted matching, NOT these per-component weights.
     reward_breakdown: Optional[Dict[str, float]] = None
     expected_score_range: Optional[Tuple[float, float]] = None
 

@@ -81,7 +81,7 @@ def _compute_partial_progress(
     
     for category in agent_by_category:
         if category not in progress:
-            progress[category] = 1.0
+            progress[category] = 0.0  # False positives in non-gold categories penalized
     
     return progress
 
@@ -193,44 +193,21 @@ def grade_action(
     return score, feedback
 
 
-def score_redline(
-    proposed_language: str,
-    gold_redline: str,
-) -> float:
-    """Score a redline proposal against gold standard."""
-    if not proposed_language or not gold_redline:
-        return 0.0
-
-    proposed_lower = proposed_language.lower()
-    gold_lower = gold_redline.lower()
-
-    key_concepts = [
-        "indemnif",
-        "data breach",
-        "pii",
-        "personal data",
-        "material breach",
-    ]
-    concept_score = sum(0.10 / len(key_concepts) for concept in key_concepts if concept in proposed_lower)
-
-    gold_words = set(gold_lower.split())
-    proposed_words = set(proposed_lower.split())
-    overlap = len(gold_words & proposed_words) / max(len(gold_words), 1)
-    precision_score = min(overlap * 0.5, 0.5)
-
-    return min(1.0, concept_score + precision_score)
 
 
 # ─── helper to build rules_to_check ──────────────────────────────────────
 
 
 def _build_rules_to_check(task: TaskConfig) -> List[str]:
-    """Build rules_to_check list including both direct and cross-doc violations."""
-    all_rule_ids = _get_all_violation_rule_ids(task)
+    """Build rules_to_check list with ALL rules from the rulebook.
+    
+    The agent must check every rule against the contract and decide which
+    ones are actually violated — this is what makes it a real audit task.
+    Severity is included so the LLM can match it exactly for full scoring credit.
+    """
     return [
-        f"{r.rule_id}: {r.description}"
+        f"{r.rule_id} [severity={r.severity}]: {r.description}"
         for r in RULEBOOK
-        if r.rule_id in all_rule_ids
     ]
 
 

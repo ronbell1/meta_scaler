@@ -160,6 +160,10 @@ COMPLIANT_CLAUSE_TEMPLATES = {
         "Each party shall indemnify the other against claims arising from data breaches caused by that party's negligence or willful misconduct, including costs of notification and credit monitoring.",
         "Vendor shall indemnify Client against any losses arising from a data breach or security incident caused by Vendor's failure to implement adequate security measures.",
     ],
+    "asymmetric_liability": [
+        "Both parties' total aggregate liability under this Agreement shall be capped equally at two times (2x) the annual contract value. No party's liability shall be uncapped or unlimited.",
+        "Liability caps shall apply symmetrically to both parties. Neither party shall have unlimited liability while the other's liability is capped.",
+    ],
 }
 
 
@@ -302,6 +306,7 @@ CONTRACT_STRUCTURES = {
             ("CONFIDENTIALITY", "{confidentiality}"),
             ("LIMITATION OF LIABILITY", "{limitation_of_liability}"),
             ("LIABILITY CAP", "{liability_cap}"),
+            ("ASYMMETRIC LIABILITY", "{asymmetric_liability}"),
             ("CONSEQUENTIAL DAMAGES", "{consequential_damages}"),
             ("INDEMNIFICATION", "{indemnification}"),
             ("DATA BREACH INDEMNITY", "{data_breach_indemnity}"),
@@ -588,7 +593,13 @@ class ContractGenerator:
         return contract_text, violations
 
     def _rule_maps_to_clause(self, rule_id: str, clause_key: str) -> bool:
-        """Map each rule to its OWN unique clause key to avoid overwrites."""
+        """Map each rule to its OWN unique clause key to avoid overwrites.
+        
+        IMPORTANT: Every rule_id MUST map to a UNIQUE clause_key.
+        Previously RULE_01 and RULE_16 both mapped to 'liability_cap',
+        causing one to silently overwrite the other. RULE_16 now maps
+        to 'asymmetric_liability', which has its own section slot.
+        """
         mapping = {
             "RULE_01": "liability_cap",
             "RULE_02": "payment_terms",
@@ -605,7 +616,7 @@ class ContractGenerator:
             "RULE_13": "late_payment_penalty",
             "RULE_14": "currency_risk",
             "RULE_15": "background_ip",
-            "RULE_16": "liability_cap",
+            "RULE_16": "asymmetric_liability",  # Fixed: was 'liability_cap' (same as RULE_01)
             "RULE_17": "consequential_damages",
             "RULE_18": "data_breach_indemnity",
             "RULE_19": "sla_penalties",

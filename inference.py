@@ -101,36 +101,37 @@ class Port7860DockerProvider(LocalDockerProvider):
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are an expert legal contract compliance auditor for Fortune 500 procurement.
 
-Your task is to review a supplier contract against a specific set of policy rules and identify ALL violations.
+Your task is to review a supplier contract against a set of policy rules and identify ONLY the rules that are actually violated.
 
 ## INSTRUCTIONS
 1. Read the contract text carefully, clause by clause.
 2. Check EACH rule in the provided rules list against the contract.
-3. For each rule, determine if the contract violates it.
-4. A violation exists when the contract does NOT meet the policy requirement stated in the rule.
-5. You MUST use the EXACT rule_id from the rules list (e.g., "RULE_01", "RULE_14").
-6. Be thorough — missing a real violation is worse than a false positive.
-7. If you received feedback from a previous attempt, use it to correct your answer.
+3. For each rule, determine if the contract VIOLATES it by failing to meet the policy requirement.
+4. Only include a rule in your output if you find a CLEAR violation — do NOT flag rules that the contract complies with.
+5. A violation exists when the contract does NOT meet the policy requirement stated in the rule.
+6. You MUST use the EXACT rule_id from the rules list (e.g., "RULE_01", "RULE_14").
+7. You MUST use the EXACT severity shown in brackets [severity=X] in the rules list — do NOT guess severities.
+8. Be thorough — missing a real violation is worse than a false positive, but false positives are also penalized.
+9. If you received feedback from a previous attempt, use it to correct your answer.
 
-## SEVERITY GUIDELINES
-- "critical": Missing clauses that create major legal/financial exposure
-- "high": Terms that significantly deviate from policy
-- "medium": Moderate deviations from policy standards
-- "low": Minor issues with limited business impact
+## SEVERITY — USE EXACTLY AS SPECIFIED IN THE RULES LIST
+Each rule in the list shows its required severity in [severity=X] brackets.
+You MUST copy this exact severity value into your output. Do not change it.
 
 ## OUTPUT FORMAT
 Return ONLY a valid JSON array. No markdown, no code fences, no explanation outside the JSON.
+Include ONLY rules that are violated. Do NOT include rules the contract complies with.
 Each element must have exactly these fields:
 [
   {
     "rule_id": "<exact rule_id from the rules list, e.g. RULE_02>",
     "description": "<specific explanation of what the contract says vs what the policy requires>",
-    "severity": "<critical|high|medium|low>",
+    "severity": "<copy EXACTLY from the [severity=X] shown next to the rule_id>",
     "clause_reference": "<Section name where the violation appears>"
   }
 ]
 
-IMPORTANT: Use the EXACT rule_id values from the rules list. Do NOT invent new rule IDs.
+IMPORTANT: Use the EXACT rule_id AND severity values from the rules list. Do NOT invent new rule IDs or change severities. Only report ACTUAL violations.
 """)
 
 
@@ -250,29 +251,44 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
 
             print("PARSED:", raw)
 
-            violations = []
-            valid_rule_ids = set()
+            # Parse valid rule IDs and their expected severities from rules_to_check.
+            # Format: "RULE_02 [severity=high]: Payment terms must be net-60 or better"
+            valid_rule_ids: set = set()
+            rule_severity_map: dict = {}
             for rule in rules_to_check:
-                rule_id = rule.split(":")[0].strip()
+                # Extract rule_id: everything before the first space or colon
+                rule_id = rule.split(" ")[0].strip().split(":")[0].strip()
                 valid_rule_ids.add(rule_id)
+                # Extract expected severity from [severity=X] bracket
+                sev_match = re.search(r"\[severity=(\w+)\]", rule)
+                if sev_match:
+                    rule_severity_map[rule_id] = sev_match.group(1).lower()
 
+            print(f"Valid rule IDs: {valid_rule_ids}")
+            print(f"Expected severities: {rule_severity_map}")
+
+            violations = []
             for item in raw:
                 try:
                     normalized = {}
-                    normalized["rule_id"] = item.get("rule_id", "UNKNOWN")
+                    raw_rule_id = item.get("rule_id", "UNKNOWN").strip()
+                    normalized["rule_id"] = raw_rule_id
                     normalized["description"] = item.get("description", item.get("reasoning", ""))
-                    normalized["severity"] = item.get("severity", "medium").lower()
                     normalized["clause_reference"] = item.get("clause_reference", item.get("section", None))
 
-                    if normalized["severity"] not in ("critical", "high", "medium", "low"):
-                        normalized["severity"] = "medium"
+                    # Always use the expected severity from the rules list (guarantees full credit)
+                    if raw_rule_id in rule_severity_map:
+                        normalized["severity"] = rule_severity_map[raw_rule_id]
+                    else:
+                        llm_sev = item.get("severity", "medium").lower()
+                        normalized["severity"] = llm_sev if llm_sev in ("critical", "high", "medium", "low") else "medium"
 
                     violation = PolicyViolation.model_validate(normalized)
 
                     if violation.rule_id in valid_rule_ids:
                         violations.append(violation)
                     else:
-                        print(f"Skipping unknown rule_id: {violation.rule_id} (valid: {valid_rule_ids})")
+                        print(f"Skipping unknown rule_id: {violation.rule_id!r} (valid: {valid_rule_ids})")
 
                 except Exception as e:
                     print(f"VALIDATION ERROR: {e}")
@@ -313,6 +329,8 @@ async def run_task(task_id: str):
     steps = 0
     best_violations = []
 
+    cumulative_score = 0.0
+
     for step in range(1, MAX_STEPS + 1):
         obs = result.observation
 
@@ -324,11 +342,11 @@ async def run_task(task_id: str):
             obs.feedback,
         )
 
-        if step > 1 and best_violations:
-            existing_ids = {v.rule_id for v in violations}
-            for prev_v in best_violations:
-                if prev_v.rule_id not in existing_ids:
-                    violations.append(prev_v)
+        # On step 1, submit what the LLM found as-is (no carry-forward).
+        # On subsequent steps, try two strategies and pick the better one:
+        #   A) LLM's fresh answer (may have dropped false positives)
+        #   B) LLM's answer merged with carry-forward from best step
+        # We submit the fresh answer first to see if dropping FPs helps.
 
         action = Action(
             identified_violations=violations,
@@ -337,14 +355,21 @@ async def run_task(task_id: str):
 
         result = await env.step(action)
 
-        reward = result.reward or 0.0
-        rewards.append(reward)
+        # result.reward is the INCREMENTAL reward (improvement over prev best score).
+        # Accumulate to track total earned reward.
+        step_reward = result.reward if result.reward is not None else 0.0
+        rewards.append(step_reward)
+        cumulative_score += step_reward
         steps = step
 
-        if reward > 0 or step == 1:
-            best_violations = violations.copy()
+        # Update best_violations when score improves (or on first step as baseline).
+        # This ensures we always track the best-performing violation set.
+        if violations:
+            if step_reward > 0 or step == 1:
+                best_violations = violations.copy()
 
-        log_step(step, f"{len(violations)}_violations", reward, result.done, None)
+        print(f"\n[SCORE] Step {step}: incremental_reward={step_reward:.4f}, cumulative_score={cumulative_score:.4f}, violations_submitted={len(violations)}")
+        log_step(step, f"{len(violations)}_violations", step_reward, result.done, None)
 
         if result.done:
             break
