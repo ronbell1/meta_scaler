@@ -195,15 +195,22 @@ if STATIC_DIR.exists():
 
 
 def main(host: str = "0.0.0.0", port: int = 7860) -> None:
+    """Entry point for `[project.scripts]` and direct invocation."""
+    import argparse
+    import sys
     import uvicorn
+
+    # Parse args only when run directly (not via entry_points)
+    if len(sys.argv) > 1:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--host", type=str, default=host)
+        parser.add_argument("--port", type=int, default=port)
+        args = parser.parse_args()
+        host = args.host
+        port = args.port
 
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=7860)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()
