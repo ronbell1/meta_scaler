@@ -2,30 +2,18 @@
 Inference Script - Procurement Contract Anomaly Auditor OpenEnv
 ===============================================================
 MANDATORY env vars (injected by the validator at runtime):
-    API_BASE_URL   The LiteLLM proxy endpoint URL.
-    API_KEY        The API key for the LiteLLM proxy.
-    MODEL_NAME     The model identifier to use for inference.
-    LOCAL_IMAGE_NAME  Docker image name for the env container.
+  API_BASE_URL        The LiteLLM proxy endpoint URL.
+  HF_TOKEN or API_KEY The API key for the LiteLLM proxy.
+  MODEL_NAME          The model identifier to use for inference.
+  LOCAL_IMAGE_NAME    Docker image name for the env container.
 
 STDOUT FORMAT
-- Exactly three line types, in this order:
-
-    [START] task=<task_name> env=<benchmark> model=<model_name>
-    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
-
-  Rules:
-    - One [START] line at episode begin.
-    - One [STEP] line per step, immediately after env.step() returns.
-    - One [END] line after env.close(), always emitted (even on exception).
-    - reward and rewards formatted to 2 decimal places.
-    - done and success are lowercase booleans: true or false.
-    - error is the raw last_action_error string, or null if none.
-    - All fields on a single line with no newlines within a line.
+  [START] task=<task_name> env=<benchmark> model=<model_name>
+  [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
 """
 
 from pathlib import Path
-
 import asyncio
 import json
 import os
@@ -36,77 +24,58 @@ import time
 import traceback
 from typing import Any, Dict, List, Optional
 
-# Only load .env as a LOCAL DEV fallback — never override injected validator vars.
-# FIX (Issue 3): Only load .env if the validator has NOT already injected the
-# required credentials. An empty string counts as "set" with override=False,
-# so we skip loading entirely when the real values are already present.
+# Load .env ONLY as fallback for local dev — never override injected vars
 from dotenv import load_dotenv
-
 _env_path = Path(__file__).resolve().parent / ".env"
-_needs_dotenv = not os.environ.get("API_BASE_URL") or not os.environ.get("API_KEY")
-if _env_path.exists() and _needs_dotenv:
-    load_dotenv(_env_path, override=False)  # never override existing env vars
+if _env_path.exists():
+    load_dotenv(_env_path, override=False)
 
 from openai import OpenAI
 from openenv.core.containers.runtime import LocalDockerProvider
-
 from models import PolicyViolation
 from my_env import Action, LegalContractClient
 
-
-# ── API Configuration ─────────────────────────────────────────────────────────
-# Strictly read API_BASE_URL and API_KEY from environment variables.
-# The validator INJECTS these — do NOT hardcode or fall back to other providers.
-
+# ── API Configuration ──────────────────────────────────────────────────────────
+# Accept both HF_TOKEN (what the validator injects) and API_KEY (fallback)
 API_BASE_URL = os.environ.get("API_BASE_URL", "")
-API_KEY = os.environ.get("API_KEY", "")
+API_KEY = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
 
-# Validate that the required proxy credentials are present
 if not API_BASE_URL:
     raise EnvironmentError(
-        "API_BASE_URL is not set. The validator must inject this environment variable. "
-        "Do NOT hardcode it or fall back to other providers."
+        "API_BASE_URL is not set. The validator must inject this variable."
     )
-
 if not API_KEY:
     raise EnvironmentError(
-        "API_KEY is not set. The validator must inject this environment variable. "
-        "Do NOT use your own API key or other credentials."
+        "Neither API_KEY nor HF_TOKEN is set. The validator must inject one of these."
     )
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
 BENCHMARK = "procurement-contract-audit"
-MAX_STEPS = int(os.getenv("MAX_STEPS", "10"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))
 TEMPERATURE = 0.0
-MAX_TOKENS = 4096
+MAX_TOKENS = 2048
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
 
-# Debug: show which endpoint and key prefix are in use
 print(f"[CONFIG] API_BASE_URL = {API_BASE_URL}", flush=True)
 print(f"[CONFIG] MODEL_NAME   = {MODEL_NAME}", flush=True)
 print(f"[CONFIG] API_KEY      = {API_KEY[:8]}...{API_KEY[-4:]}", flush=True)
 
 
+# ── Docker Provider ────────────────────────────────────────────────────────────
 class Port7860DockerProvider(LocalDockerProvider):
     MAX_RETRIES = 3
-    HEALTH_TIMEOUT = 30  # seconds to wait for container to become healthy
+    HEALTH_TIMEOUT = 30
 
     def _cleanup_existing_container(self, name: str) -> None:
-        """Remove any existing container with the given name (stopped or running)."""
         try:
-            subprocess.run(
-                ["docker", "rm", "-f", name],
-                capture_output=True, text=True, check=False,
-            )
+            subprocess.run(["docker", "rm", "-f", name],
+                           capture_output=True, text=True, check=False)
         except Exception:
-            pass  # Container may not exist — that's fine
+            pass
 
     def _wait_for_healthy(self, url: str, timeout: int = 30) -> bool:
-        """Poll the container's /health endpoint until it responds or timeout."""
-        import urllib.request
-        import urllib.error
-
+        import urllib.request, urllib.error
         health_url = f"{url}/health"
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -121,43 +90,22 @@ class Port7860DockerProvider(LocalDockerProvider):
         print(f"WARNING: Container not healthy after {timeout}s at {health_url}")
         return False
 
-    def start_container(
-        self,
-        image: str,
-        port: Optional[int] = None,
-        env_vars: Optional[Dict[str, str]] = None,
-        **kwargs: Any,
-    ) -> str:
+    def start_container(self, image: str, port: Optional[int] = None,
+                        env_vars: Optional[Dict[str, str]] = None,
+                        **kwargs: Any) -> str:
         last_error: Optional[Exception] = None
-
         for attempt in range(1, self.MAX_RETRIES + 1):
             if port is None:
                 port = self._find_available_port()
-
             self._container_name = self._generate_container_name(image)
-
-            # Remove any leftover container with the same name
             self._cleanup_existing_container(self._container_name)
-
-            cmd = [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                self._container_name,
-                "-p",
-                f"{port}:7860",
-            ]
-
+            cmd = ["docker", "run", "-d", "--name", self._container_name,
+                   "-p", f"{port}:7860"]
             if env_vars:
                 for key, value in env_vars.items():
                     cmd.extend(["-e", f"{key}={value}"])
-
             cmd.append(image)
-
             print(f"\nStarting Docker container (attempt {attempt}/{self.MAX_RETRIES})...")
-            print("COMMAND:", " ".join(cmd))
-
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 self._container_id = result.stdout.strip()
@@ -165,64 +113,45 @@ class Port7860DockerProvider(LocalDockerProvider):
                 stderr = exc.stderr or ""
                 print(f"DOCKER ERROR (attempt {attempt}): {stderr}")
                 last_error = exc
-
-                # If it's a port conflict, try again with a new port
                 if "port is already allocated" in stderr or "address already in use" in stderr:
-                    port = None  # will pick a new port on next attempt
+                    port = None
                     continue
-                # If it's a name conflict (shouldn't happen after cleanup, but just in case)
                 if "is already in use by container" in stderr:
                     self._cleanup_existing_container(self._container_name)
                     continue
-                # Unknown error — don't retry
                 raise RuntimeError(f"Docker failed: {stderr}") from exc
-
             url = f"http://localhost:{port}"
-
-            # Wait for the container to be reachable before returning
             self._wait_for_healthy(url, timeout=self.HEALTH_TIMEOUT)
-
             return url
-
-        raise RuntimeError(
-            f"Docker failed after {self.MAX_RETRIES} attempts"
-        ) from last_error
+        raise RuntimeError(f"Docker failed after {self.MAX_RETRIES} attempts") from last_error
 
 
+# ── Prompts ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are an expert legal contract compliance auditor for Fortune 500 procurement.
-
 Your task is to review a supplier contract against a set of policy rules and identify ONLY the rules that are actually violated.
 
 ## INSTRUCTIONS
 1. Read the contract text carefully, clause by clause.
 2. Check EACH rule in the provided rules list against the contract.
 3. For each rule, determine if the contract VIOLATES it by failing to meet the policy requirement.
-4. Only include a rule in your output if you find a CLEAR violation — do NOT flag rules that the contract complies with.
-5. A violation exists when the contract does NOT meet the policy requirement stated in the rule.
-6. You MUST use the EXACT rule_id from the rules list (e.g., "RULE_01", "RULE_14").
-7. You MUST use the EXACT severity shown in brackets [severity=X] in the rules list — do NOT guess severities.
-8. Be thorough — missing a real violation is worse than a false positive, but false positives are also penalized.
-9. If you received feedback from a previous attempt, use it to correct your answer.
-
-## SEVERITY — USE EXACTLY AS SPECIFIED IN THE RULES LIST
-Each rule in the list shows its required severity in [severity=X] brackets.
-You MUST copy this exact severity value into your output. Do not change it.
+4. Only include a rule in your output if you find a CLEAR violation.
+5. You MUST use the EXACT rule_id from the rules list (e.g., "RULE_01").
+6. You MUST use the EXACT severity shown in brackets [severity=X] in the rules list.
+7. If you received feedback from a previous attempt, use it to correct your answer.
 
 ## OUTPUT FORMAT
-Return ONLY a valid JSON array. No markdown, no code fences, no explanation outside the JSON.
-Include ONLY rules that are violated. Do NOT include rules the contract complies with.
-Each element must have exactly these fields:
+Return ONLY a valid JSON array. No markdown, no code fences, no explanation.
+Include ONLY rules that are violated.
+
 [
   {
-    "rule_id": "<exact rule_id from the rules list, e.g. RULE_02>",
-    "description": "<specific explanation of what the contract says vs what the policy requires>",
-    "severity": "<copy EXACTLY from the [severity=X] shown next to the rule_id>",
+    "rule_id": "<exact rule_id>",
+    "description": "<what the contract says vs what policy requires>",
+    "severity": "<copy EXACTLY from [severity=X]>",
     "clause_reference": "<Section name where the violation appears>"
   }
 ]
-
-IMPORTANT: Use the EXACT rule_id AND severity values from the rules list. Do NOT invent new rule IDs or change severities. Only report ACTUAL violations.
 """)
 
 
@@ -230,56 +159,47 @@ def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+def log_step(step: int, action: str, reward: float, done: bool,
+             error: Optional[str]) -> None:
     error_val = error if error else "null"
     done_val = str(done).lower()
-    print(
-        f"[STEP]  step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
-        flush=True,
-    )
+    print(f"[STEP] step={step} action={action} reward={reward:.2f} "
+          f"done={done_val} error={error_val}", flush=True)
 
 
 def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+    # IMPORTANT: exact format per spec — no extra fields like score=
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    # score is the total cumulative reward clamped to [0.0, 1.0] as required
-    score = min(1.0, max(0.0, sum(rewards)))
-    print(
-        f"[END]   success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
-        flush=True,
-    )
+    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+          flush=True)
 
 
 def build_user_prompt(contract_text, rules_to_check, step, feedback):
-    rules_block = "\n".join(f"  {i + 1}. {r}" for i, r in enumerate(rules_to_check))
-
-    prompt_parts = []
-
-    prompt_parts.append(f"## CONTRACT TEXT\n{contract_text.strip()}")
-
-    prompt_parts.append(f"""## POLICY RULES TO CHECK
-Check EACH of the following rules against the contract. For every rule that is violated, include it in your output with the EXACT rule_id shown:
-{rules_block}""")
-
+    rules_block = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(rules_to_check))
+    parts = []
+    parts.append(f"## CONTRACT TEXT\n{contract_text.strip()}")
+    parts.append(
+        f"## POLICY RULES TO CHECK\n"
+        f"Check EACH rule. For every violated rule include it with the EXACT rule_id:\n"
+        f"{rules_block}"
+    )
     if feedback and step > 1 and "Review the contract" not in feedback:
-        prompt_parts.append(f"""## FEEDBACK FROM PREVIOUS ATTEMPT (Step {step - 1})
-{feedback}
-
-IMPORTANT: Carefully review the feedback above. If violations were "Missed", you MUST find and include them this time. If there were "False positives", remove those from your answer. Keep all previously "Matched" violations.""")
-
-    prompt_parts.append(f"""## TASK
-Analyze the contract against ALL {len(rules_to_check)} rules listed above.
-Return a JSON array with one entry per violation found. Use the EXACT rule_id values from the rules list.""")
-
-    return "\n\n".join(prompt_parts)
+        parts.append(
+            f"## FEEDBACK FROM PREVIOUS ATTEMPT (Step {step - 1})\n{feedback}\n\n"
+            f"IMPORTANT: Fix missed violations and remove false positives."
+        )
+    parts.append(
+        f"## TASK\nAnalyze the contract against ALL {len(rules_to_check)} rules. "
+        f"Return a JSON array with one entry per violation found."
+    )
+    return "\n\n".join(parts)
 
 
 def extract_json_from_text(text: str) -> Optional[list]:
-    """Robustly extract JSON array from model output."""
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
     text = text.strip()
-
     try:
         result = json.loads(text)
         if isinstance(result, list):
@@ -288,7 +208,6 @@ def extract_json_from_text(text: str) -> Optional[list]:
             return [result]
     except json.JSONDecodeError:
         pass
-
     bracket_match = re.search(r"\[[\s\S]*\]", text)
     if bracket_match:
         try:
@@ -297,7 +216,6 @@ def extract_json_from_text(text: str) -> Optional[list]:
                 return result
         except json.JSONDecodeError:
             pass
-
     objects = re.findall(r"\{[^{}]*\}", text)
     if objects:
         results = []
@@ -308,20 +226,17 @@ def extract_json_from_text(text: str) -> Optional[list]:
                 continue
         if results:
             return results
-
     return None
 
 
 def get_model_violations(client, contract_text, rules_to_check, step, feedback):
     user_prompt = build_user_prompt(contract_text, rules_to_check, step, feedback)
-
-    print("\n===== USER PROMPT =====")
+    print(f"\n===== USER PROMPT (step {step}) =====")
     print(user_prompt[:500] + "..." if len(user_prompt) > 500 else user_prompt)
 
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, 4):
         try:
-            print(f"\n--- LLM call attempt {attempt}/{max_retries} ---")
+            print(f"\n--- LLM call attempt {attempt}/3 ---")
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
@@ -331,91 +246,70 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
             )
-
             text = (completion.choices[0].message.content or "").strip()
-
             print("\n===== RAW MODEL OUTPUT =====")
             print(text)
 
             raw = extract_json_from_text(text)
             if raw is None:
-                print("JSON EXTRACTION FAILED - no valid JSON found in output")
+                print("JSON EXTRACTION FAILED")
                 return []
 
-            print("PARSED:", raw)
-
-            # Parse valid rule IDs and their expected severities from rules_to_check.
-            # Format: "RULE_02 [severity=high]: Payment terms must be net-60 or better"
+            # Build valid rule ID → expected severity map from rules_to_check
             valid_rule_ids: set = set()
             rule_severity_map: dict = {}
             for rule in rules_to_check:
-                # Extract rule_id: everything before the first space or colon
                 rule_id = rule.split(" ")[0].strip().split(":")[0].strip()
                 valid_rule_ids.add(rule_id)
-                # Extract expected severity from [severity=X] bracket
                 sev_match = re.search(r"\[severity=(\w+)\]", rule)
                 if sev_match:
                     rule_severity_map[rule_id] = sev_match.group(1).lower()
 
-            print(f"Valid rule IDs: {valid_rule_ids}")
-            print(f"Expected severities: {rule_severity_map}")
-
             violations = []
             for item in raw:
                 try:
-                    normalized = {}
-                    raw_rule_id = item.get("rule_id", "UNKNOWN").strip()
-                    normalized["rule_id"] = raw_rule_id
-                    normalized["description"] = item.get("description", item.get("reasoning", ""))
-                    normalized["clause_reference"] = item.get("clause_reference", item.get("section", None))
-
-                    # Always use the expected severity from the rules list (guarantees full credit)
-                    if raw_rule_id in rule_severity_map:
-                        normalized["severity"] = rule_severity_map[raw_rule_id]
-                    else:
-                        llm_sev = item.get("severity", "medium").lower()
-                        normalized["severity"] = llm_sev if llm_sev in ("critical", "high", "medium", "low") else "medium"
-
+                    normalized = {
+                        "rule_id": item.get("rule_id", "UNKNOWN").strip(),
+                        "description": item.get("description", item.get("reasoning", "")),
+                        "clause_reference": item.get("clause_reference",
+                                                     item.get("section", None)),
+                        "severity": rule_severity_map.get(
+                            item.get("rule_id", "").strip(),
+                            item.get("severity", "medium").lower()
+                        ),
+                    }
                     violation = PolicyViolation.model_validate(normalized)
-
                     if violation.rule_id in valid_rule_ids:
                         violations.append(violation)
                     else:
-                        print(f"Skipping unknown rule_id: {violation.rule_id!r} (valid: {valid_rule_ids})")
-
+                        print(f"Skipping unknown rule_id: {violation.rule_id!r}")
                 except Exception as e:
                     print(f"VALIDATION ERROR: {e}")
 
-            print(f"FINAL: {len(violations)} violations (from {len(raw)} raw items)")
-            for v in violations:
-                print(f"  - {v.rule_id}: {v.description[:80]}... [{v.severity}]")
-
+            print(f"FINAL: {len(violations)} violations")
             return violations
 
         except Exception as e:
-            print(f"LLM ERROR (attempt {attempt}/{max_retries}): {type(e).__name__}: {e}")
-            if attempt < max_retries:
-                wait_time = 2 ** attempt
-                print(f"Retrying in {wait_time}s...")
-                time.sleep(wait_time)
+            print(f"LLM ERROR (attempt {attempt}/3): {type(e).__name__}: {e}")
+            traceback.print_exc()
+            if attempt < 3:
+                wait = 2 ** attempt
+                print(f"Retrying in {wait}s...")
+                time.sleep(wait)
             else:
                 print("All retries exhausted.")
                 return []
 
 
 async def run_task(task_id: str):
-    """Run a single task and return results."""
-    # FIX (Issue 1 & 2): Initialize client and resolve image name with hard fails.
-    # Per validator requirements: base_url=os.environ["API_BASE_URL"] and api_key=os.environ["API_KEY"]
+    # Initialize client with injected credentials — strictly no hardcoding
     client = OpenAI(
         base_url=os.environ["API_BASE_URL"],
-        api_key=os.environ["API_KEY"],
+        api_key=os.environ.get("API_KEY") or os.environ["HF_TOKEN"],
         timeout=60.0,
     )
-    # FIX (Issue 2): Hard-fail if LOCAL_IMAGE_NAME is missing — do NOT silently
-    # fall back to "my-env" which may not match the validator-injected image name.
-    image_name = os.environ["LOCAL_IMAGE_NAME"]
 
+    image_name = os.environ.get("LOCAL_IMAGE_NAME", "my-env")
     log_start(task_id, BENCHMARK, MODEL_NAME)
 
     rewards: List[float] = []
@@ -426,9 +320,7 @@ async def run_task(task_id: str):
         env = await LegalContractClient.from_docker_image(
             image_name, provider=Port7860DockerProvider()
         )
-
         result = await env.reset(task_id=task_id)
-
         best_violations = []
         cumulative_score = 0.0
 
@@ -437,51 +329,34 @@ async def run_task(task_id: str):
 
             try:
                 violations = get_model_violations(
-                    client,
-                    obs.contract_text,
-                    obs.rules_to_check,
-                    step,
-                    obs.feedback,
+                    client, obs.contract_text, obs.rules_to_check, step, obs.feedback
                 )
             except Exception as e:
-                print(f"ERROR in get_model_violations at step {step}: {e}")
+                traceback.print_exc()
                 violations = best_violations if best_violations else []
-
-            # On step 1, submit what the LLM found as-is (no carry-forward).
-            # On subsequent steps, try two strategies and pick the better one:
-            #   A) LLM's fresh answer (may have dropped false positives)
-            #   B) LLM's answer merged with carry-forward from best step
-            # We submit the fresh answer first to see if dropping FPs helps.
 
             action = Action(
                 identified_violations=violations,
-                reasoning=f"Step {step}: Identified {len(violations)} violations by checking each policy rule against contract clauses.",
+                reasoning=f"Step {step}: Identified {len(violations)} violations.",
             )
-
             result = await env.step(action)
 
-            # result.reward is the INCREMENTAL reward (improvement over prev best score).
-            # Accumulate to track total earned reward.
             step_reward = result.reward if result.reward is not None else 0.0
             rewards.append(step_reward)
             cumulative_score += step_reward
             steps = step
 
-            # Update best_violations when score improves (or on first step as baseline).
-            # This ensures we always track the best-performing violation set.
-            if violations:
-                if step_reward > 0 or step == 1:
-                    best_violations = violations.copy()
+            if violations and (step_reward > 0 or step == 1):
+                best_violations = violations.copy()
 
-            print(f"\n[SCORE] Step {step}: incremental_reward={step_reward:.4f}, cumulative_score={cumulative_score:.4f}, violations_submitted={len(violations)}")
+            print(f"\n[SCORE] step={step} incremental={step_reward:.4f} "
+                  f"cumulative={cumulative_score:.4f} violations={len(violations)}")
             log_step(step, f"{len(violations)}_violations", step_reward, result.done, None)
 
             if result.done:
                 break
 
     except Exception as e:
-        # FIX (Issue 4): Print full traceback so the real failure is visible in logs.
-        print(f"FATAL ERROR in run_task: {type(e).__name__}: {e}", flush=True)
         traceback.print_exc()
         log_step(steps + 1, "error", 0.0, True, str(e))
     finally:
@@ -491,44 +366,18 @@ async def run_task(task_id: str):
             except Exception:
                 pass
 
-        success = sum(rewards) >= SUCCESS_SCORE_THRESHOLD
-        log_end(success, steps, rewards)
-
+    success = sum(rewards) >= SUCCESS_SCORE_THRESHOLD
+    log_end(success, steps, rewards)
     return success, sum(rewards), steps
 
 
 async def main():
-    """Run all tasks or a single task based on env var."""
-
-    # FIX (Issue 5): Smoke-test the LiteLLM proxy BEFORE starting the env container.
-    # This confirms routing works independently of Docker, and ensures at least one
-    # API call is visible to the validator even if the container fails to start.
-    print("[PROXY CHECK] Testing LiteLLM proxy connection...", flush=True)
-    _smoke_client = OpenAI(
-        base_url=os.environ["API_BASE_URL"],
-        api_key=os.environ["API_KEY"],
-    )
-    try:
-        _smoke_resp = _smoke_client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Say hello."}],
-            max_tokens=10,
-        )
-        print(f"[PROXY CHECK] OK: {_smoke_resp.choices[0].message.content}", flush=True)
-    except Exception as _e:
-        print(f"[PROXY CHECK] FAILED: {type(_e).__name__}: {_e}", flush=True)
-        traceback.print_exc()
-        raise  # Fail fast — if the proxy is broken, nothing will work
-
     task_id = os.getenv("PROCUREMENT_TASK", "easy")
-
     if task_id == "all":
         for tid in ["easy", "medium", "hard"]:
-            print(f"\n{'=' * 60}")
-            print(f"Running task: {tid}")
-            print(f"{'=' * 60}")
+            print(f"\n{'='*60}\nRunning task: {tid}\n{'='*60}")
             success, total_reward, steps = await run_task(tid)
-            print(f"\nTask {tid}: success={success}, total_reward={total_reward:.2f}, steps={steps}")
+            print(f"\nTask {tid}: success={success}, reward={total_reward:.2f}, steps={steps}")
     else:
         await run_task(task_id)
 
