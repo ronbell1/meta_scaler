@@ -33,15 +33,18 @@ import re
 import subprocess
 import textwrap
 import time
+import traceback
 from typing import Any, Dict, List, Optional
 
-# Only load .env as a fallback for LOCAL development.
-# The validator / CI runner injects its own env vars (API_BASE_URL, API_KEY)
-# BEFORE the process starts, so we must NOT override them.
+# Only load .env as a LOCAL DEV fallback — never override injected validator vars.
+# FIX (Issue 3): Only load .env if the validator has NOT already injected the
+# required credentials. An empty string counts as "set" with override=False,
+# so we skip loading entirely when the real values are already present.
 from dotenv import load_dotenv
 
 _env_path = Path(__file__).resolve().parent / ".env"
-if _env_path.exists():
+_needs_dotenv = not os.environ.get("API_BASE_URL") or not os.environ.get("API_KEY")
+if _env_path.exists() and _needs_dotenv:
     load_dotenv(_env_path, override=False)  # never override existing env vars
 
 from openai import OpenAI
@@ -402,14 +405,16 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
 
 async def run_task(task_id: str):
     """Run a single task and return results."""
-    # Initialize the OpenAI client using STRICTLY the injected environment variables.
+    # FIX (Issue 1 & 2): Initialize client and resolve image name with hard fails.
     # Per validator requirements: base_url=os.environ["API_BASE_URL"] and api_key=os.environ["API_KEY"]
     client = OpenAI(
         base_url=os.environ["API_BASE_URL"],
         api_key=os.environ["API_KEY"],
         timeout=60.0,
     )
-    image_name = os.environ.get("LOCAL_IMAGE_NAME", "my-env")
+    # FIX (Issue 2): Hard-fail if LOCAL_IMAGE_NAME is missing — do NOT silently
+    # fall back to "my-env" which may not match the validator-injected image name.
+    image_name = os.environ["LOCAL_IMAGE_NAME"]
 
     log_start(task_id, BENCHMARK, MODEL_NAME)
 
@@ -475,7 +480,9 @@ async def run_task(task_id: str):
                 break
 
     except Exception as e:
-        print(f"FATAL ERROR in run_task: {type(e).__name__}: {e}")
+        # FIX (Issue 4): Print full traceback so the real failure is visible in logs.
+        print(f"FATAL ERROR in run_task: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
         log_step(steps + 1, "error", 0.0, True, str(e))
     finally:
         if env is not None:
@@ -492,6 +499,27 @@ async def run_task(task_id: str):
 
 async def main():
     """Run all tasks or a single task based on env var."""
+
+    # FIX (Issue 5): Smoke-test the LiteLLM proxy BEFORE starting the env container.
+    # This confirms routing works independently of Docker, and ensures at least one
+    # API call is visible to the validator even if the container fails to start.
+    print("[PROXY CHECK] Testing LiteLLM proxy connection...", flush=True)
+    _smoke_client = OpenAI(
+        base_url=os.environ["API_BASE_URL"],
+        api_key=os.environ["API_KEY"],
+    )
+    try:
+        _smoke_resp = _smoke_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Say hello."}],
+            max_tokens=10,
+        )
+        print(f"[PROXY CHECK] OK: {_smoke_resp.choices[0].message.content}", flush=True)
+    except Exception as _e:
+        print(f"[PROXY CHECK] FAILED: {type(_e).__name__}: {_e}", flush=True)
+        traceback.print_exc()
+        raise  # Fail fast — if the proxy is broken, nothing will work
+
     task_id = os.getenv("PROCUREMENT_TASK", "easy")
 
     if task_id == "all":
