@@ -153,6 +153,8 @@ def _find_clause_reference(contract_text: str, rule_id: str) -> str:
 
 # ─── grading ──────────────────────────────────────────────────────────────
 
+EPSILON = 1e-6
+
 
 def grade_action(
     agent_violations: List[PolicyViolation],
@@ -161,7 +163,7 @@ def grade_action(
 ) -> Tuple[float, str]:
     """Grade agent violations against gold standard."""
     if not gold_violations:
-        return 1.0, "No violations expected; full score."
+        return 1.0 - EPSILON, "No violations expected; full score."
 
     gold_map: Dict[str, PolicyViolation] = {v.rule_id: v for v in gold_violations}
     agent_ids: Set[str] = {v.rule_id for v in agent_violations}
@@ -189,7 +191,10 @@ def grade_action(
     penalty = min(len(false_positives) * 0.05, 0.2)
     score = max(0.0, score - penalty)
 
-    feedback = f"Matched: {matched}. Missed: {missed}. False positives: {false_positives}. Score: {score:.4f}."
+    # Clamp score strictly within (0, 1) — Scaler validator rejects 0.0 and 1.0
+    score = max(EPSILON, min(1.0 - EPSILON, score))
+
+    feedback = f"Matched: {matched}. Missed: {missed}. False positives: {false_positives}. Score: {score:.6f}."
     return score, feedback
 
 
@@ -320,7 +325,7 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
         reward = max(0.0, score - prev_best)
         s.cumulative_reward = max(s.cumulative_reward, score)
 
-        done = (s.step >= s.max_steps) or (score >= 1.0)
+        done = (s.step >= s.max_steps) or (score >= 1.0 - EPSILON)
         s.done = done
         s.task_metrics["current_score"] = score
         s.task_metrics["best_score"] = s.cumulative_reward

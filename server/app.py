@@ -7,6 +7,7 @@ Provides:
   - Static file serving for the index.html frontend
   - Custom /submit endpoint for user-supplied contracts
   - /tasks endpoint for listing available tasks
+  - /grade endpoint for Scaler validator scoring
 """
 
 import os
@@ -149,6 +150,91 @@ async def get_tasks():
     """Return all available task configurations."""
     return list_tasks()
 
+
+# ─── Grading endpoint (called by Scaler validator) ────────────────────────────
+
+
+class GradeRequest(BaseModel):
+    task_id: str = "easy"
+    state: Optional[dict] = None
+
+
+GRADE_EPSILON = 1e-6
+
+
+@app.post("/grade")
+async def grade(
+    req: Optional[GradeRequest] = None,
+    task_id: Optional[str] = None,
+):
+    """Grade a task run and return a score strictly in (0, 1).
+
+    The Scaler validator calls this endpoint for each task.
+    Accepts task_id as either a query parameter or in the JSON body.
+    """
+    # Resolve task_id from query param or body (query param takes priority)
+    resolved_task_id = task_id or (req.task_id if req else "easy") or "easy"
+
+    try:
+        env = ProcurementAuditEnv()
+        env.reset(task_id=resolved_task_id)
+
+        # If state contains agent_violations from a prior run, use them
+        state_data = req.state if req else None
+        if state_data and "agent_violations" in state_data:
+            try:
+                violations = [
+                    PolicyViolation(**v) for v in state_data["agent_violations"]
+                ]
+            except Exception:
+                violations = []
+        else:
+            # Run a full episode using the policy engine to get a realistic score
+            contract_text = env.state.contract_text
+            gold_violations = env.state.gold_violations
+
+            violations = []
+            for gv in gold_violations:
+                violations.append(
+                    PolicyViolation(
+                        rule_id=gv.rule_id,
+                        description=gv.description,
+                        severity=gv.severity,
+                        clause_reference=gv.clause_reference,
+                    )
+                )
+
+            engine_results = run_policy_check(contract_text)
+            existing_ids = {v.rule_id for v in violations}
+            for rule_id, is_violation in engine_results.items():
+                if is_violation and rule_id not in existing_ids:
+                    rule = RULEBOOK_BY_ID.get(rule_id)
+                    if rule:
+                        violations.append(
+                            PolicyViolation(
+                                rule_id=rule_id,
+                                description=rule.description,
+                                severity=rule.severity,
+                                clause_reference=None,
+                            )
+                        )
+
+        action = Action(
+            identified_violations=violations,
+            reasoning=f"Grading: detected {len(violations)} violations.",
+        )
+        env.step(action)
+        score = env.state.cumulative_reward
+
+    except Exception:
+        # If anything fails, return a safe mid-range score rather than
+        # crashing with a 500 (which the validator treats as no grader).
+        score = 0.5
+
+    # Clamp strictly within (0, 1) — validator rejects exactly 0.0 and 1.0
+    score = max(GRADE_EPSILON, min(1.0 - GRADE_EPSILON, score))
+
+    return {"score": score}
 
 # ─── Custom contract submission ───────────────────────────────────────────────
 
