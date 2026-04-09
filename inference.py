@@ -1,11 +1,11 @@
 """
 Inference Script - Procurement Contract Anomaly Auditor OpenEnv
 ===============================================================
-MANDATORY env vars:
-    API_BASE_URL   The API endpoint for the LLM.
+MANDATORY env vars (injected by the validator at runtime):
+    API_BASE_URL   The LiteLLM proxy endpoint URL.
+    API_KEY        The API key for the LiteLLM proxy.
     MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
-    LOCAL_IMAGE_NAME  Docker image name if using from_docker_image()
+    LOCAL_IMAGE_NAME  Docker image name for the env container.
 
 STDOUT FORMAT
 - Exactly three line types, in this order:
@@ -36,7 +36,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 # Only load .env as a fallback for LOCAL development.
-# The validator / CI runner injects its own env vars (API_BASE_URL, API key)
+# The validator / CI runner injects its own env vars (API_BASE_URL, API_KEY)
 # BEFORE the process starts, so we must NOT override them.
 from dotenv import load_dotenv
 
@@ -51,36 +51,26 @@ from models import PolicyViolation
 from my_env import Action, LegalContractClient
 
 
-def _resolve_api_key() -> str:
-    """Return the API key from whichever env var the runner provided.
+# ── API Configuration ─────────────────────────────────────────────────────────
+# Strictly read API_BASE_URL and API_KEY from environment variables.
+# The validator INJECTS these — do NOT hardcode or fall back to other providers.
 
-    Priority order: API_KEY > OPENAI_API_KEY > HF_TOKEN
-    The validator injects API_KEY; it MUST be checked first and is the
-    only key that routes through the LiteLLM proxy.
-    """
-    for var in ("API_KEY", "OPENAI_API_KEY", "HF_TOKEN"):
-        val = os.environ.get(var)
-        if val:
-            print(f"[CONFIG] Using API key from {var}")
-            return val
+API_BASE_URL = os.environ.get("API_BASE_URL", "")
+API_KEY = os.environ.get("API_KEY", "")
+
+# Validate that the required proxy credentials are present
+if not API_BASE_URL:
     raise EnvironmentError(
-        "No API key found. Set one of: API_KEY, OPENAI_API_KEY, HF_TOKEN"
+        "API_BASE_URL is not set. The validator must inject this environment variable. "
+        "Do NOT hardcode it or fall back to other providers."
     )
 
-
-# API_BASE_URL MUST come from the environment — the validator injects its own
-# LiteLLM proxy URL here.  We provide the HF router ONLY as a last-resort
-# local-dev fallback; production runs will always have this injected.
-_raw_base_url = os.environ.get("API_BASE_URL", "")
-if not _raw_base_url:
-    print(
-        "[WARNING] API_BASE_URL not set — falling back to HF router for local dev. "
-        "The validator must inject API_BASE_URL for proxy routing to work.",
-        flush=True,
+if not API_KEY:
+    raise EnvironmentError(
+        "API_KEY is not set. The validator must inject this environment variable. "
+        "Do NOT use your own API key or other credentials."
     )
-    _raw_base_url = "https://router.huggingface.co/v1"
-API_BASE_URL = _raw_base_url
-API_KEY = _resolve_api_key()
+
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
 BENCHMARK = "procurement-contract-audit"
@@ -89,16 +79,10 @@ TEMPERATURE = 0.0
 MAX_TOKENS = 4096
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
 
-# Force the OpenAI SDK's auto-detected env vars to match our resolved values.
-# This prevents the SDK from silently using a different key or base URL
-# that was set elsewhere in the environment (e.g. OPENAI_API_KEY from HF).
-os.environ["OPENAI_API_KEY"] = API_KEY
-os.environ["OPENAI_BASE_URL"] = API_BASE_URL
-
 # Debug: show which endpoint and key prefix are in use
-print(f"[CONFIG] API_BASE_URL = {API_BASE_URL}")
-print(f"[CONFIG] MODEL_NAME   = {MODEL_NAME}")
-print(f"[CONFIG] API_KEY       = {API_KEY[:8]}...{API_KEY[-4:]}")
+print(f"[CONFIG] API_BASE_URL = {API_BASE_URL}", flush=True)
+print(f"[CONFIG] MODEL_NAME   = {MODEL_NAME}", flush=True)
+print(f"[CONFIG] API_KEY      = {API_KEY[:8]}...{API_KEY[-4:]}", flush=True)
 
 
 class Port7860DockerProvider(LocalDockerProvider):
@@ -418,9 +402,11 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
 
 async def run_task(task_id: str):
     """Run a single task and return results."""
+    # Initialize the OpenAI client using STRICTLY the injected environment variables.
+    # Per validator requirements: base_url=os.environ["API_BASE_URL"] and api_key=os.environ["API_KEY"]
     client = OpenAI(
-        base_url=API_BASE_URL,
-        api_key=API_KEY,
+        base_url=os.environ["API_BASE_URL"],
+        api_key=os.environ["API_KEY"],
         timeout=60.0,
     )
     image_name = os.environ.get("LOCAL_IMAGE_NAME", "my-env")
