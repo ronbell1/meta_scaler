@@ -56,6 +56,38 @@ SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
 
 
 class Port7860DockerProvider(LocalDockerProvider):
+    MAX_RETRIES = 3
+    HEALTH_TIMEOUT = 30  # seconds to wait for container to become healthy
+
+    def _cleanup_existing_container(self, name: str) -> None:
+        """Remove any existing container with the given name (stopped or running)."""
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", name],
+                capture_output=True, text=True, check=False,
+            )
+        except Exception:
+            pass  # Container may not exist — that's fine
+
+    def _wait_for_healthy(self, url: str, timeout: int = 30) -> bool:
+        """Poll the container's /health endpoint until it responds or timeout."""
+        import urllib.request
+        import urllib.error
+
+        health_url = f"{url}/health"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                req = urllib.request.urlopen(health_url, timeout=3)
+                if req.status == 200:
+                    print(f"Container healthy at {health_url}")
+                    return True
+            except (urllib.error.URLError, OSError):
+                pass
+            time.sleep(1)
+        print(f"WARNING: Container not healthy after {timeout}s at {health_url}")
+        return False
+
     def start_container(
         self,
         image: str,
@@ -63,39 +95,65 @@ class Port7860DockerProvider(LocalDockerProvider):
         env_vars: Optional[Dict[str, str]] = None,
         **kwargs: Any,
     ) -> str:
-        if port is None:
-            port = self._find_available_port()
+        last_error: Optional[Exception] = None
 
-        self._container_name = self._generate_container_name(image)
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            if port is None:
+                port = self._find_available_port()
 
-        cmd = [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            self._container_name,
-            "-p",
-            f"{port}:7860",
-        ]
+            self._container_name = self._generate_container_name(image)
 
-        if env_vars:
-            for key, value in env_vars.items():
-                cmd.extend(["-e", f"{key}={value}"])
+            # Remove any leftover container with the same name
+            self._cleanup_existing_container(self._container_name)
 
-        cmd.append(image)
+            cmd = [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                self._container_name,
+                "-p",
+                f"{port}:7860",
+            ]
 
-        print("\nStarting Docker container...")
-        print("COMMAND:", " ".join(cmd))
+            if env_vars:
+                for key, value in env_vars.items():
+                    cmd.extend(["-e", f"{key}={value}"])
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            self._container_id = result.stdout.strip()
-        except subprocess.CalledProcessError as exc:
-            print("DOCKER ERROR:", exc.stderr)
-            raise RuntimeError("Docker failed") from exc
+            cmd.append(image)
 
-        time.sleep(1)
-        return f"http://localhost:{port}"
+            print(f"\nStarting Docker container (attempt {attempt}/{self.MAX_RETRIES})...")
+            print("COMMAND:", " ".join(cmd))
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                self._container_id = result.stdout.strip()
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr or ""
+                print(f"DOCKER ERROR (attempt {attempt}): {stderr}")
+                last_error = exc
+
+                # If it's a port conflict, try again with a new port
+                if "port is already allocated" in stderr or "address already in use" in stderr:
+                    port = None  # will pick a new port on next attempt
+                    continue
+                # If it's a name conflict (shouldn't happen after cleanup, but just in case)
+                if "is already in use by container" in stderr:
+                    self._cleanup_existing_container(self._container_name)
+                    continue
+                # Unknown error — don't retry
+                raise RuntimeError(f"Docker failed: {stderr}") from exc
+
+            url = f"http://localhost:{port}"
+
+            # Wait for the container to be reachable before returning
+            self._wait_for_healthy(url, timeout=self.HEALTH_TIMEOUT)
+
+            return url
+
+        raise RuntimeError(
+            f"Docker failed after {self.MAX_RETRIES} attempts"
+        ) from last_error
 
 
 SYSTEM_PROMPT = textwrap.dedent("""\
@@ -321,63 +379,79 @@ async def run_task(task_id: str):
 
     log_start(task_id, BENCHMARK, MODEL_NAME)
 
-    env = await LegalContractClient.from_docker_image(image_name, provider=Port7860DockerProvider())
-
-    result = await env.reset(task_id=task_id)
-
-    rewards = []
+    rewards: List[float] = []
     steps = 0
-    best_violations = []
+    env = None
 
-    cumulative_score = 0.0
-
-    for step in range(1, MAX_STEPS + 1):
-        obs = result.observation
-
-        violations = get_model_violations(
-            client,
-            obs.contract_text,
-            obs.rules_to_check,
-            step,
-            obs.feedback,
+    try:
+        env = await LegalContractClient.from_docker_image(
+            image_name, provider=Port7860DockerProvider()
         )
 
-        # On step 1, submit what the LLM found as-is (no carry-forward).
-        # On subsequent steps, try two strategies and pick the better one:
-        #   A) LLM's fresh answer (may have dropped false positives)
-        #   B) LLM's answer merged with carry-forward from best step
-        # We submit the fresh answer first to see if dropping FPs helps.
+        result = await env.reset(task_id=task_id)
 
-        action = Action(
-            identified_violations=violations,
-            reasoning=f"Step {step}: Identified {len(violations)} violations by checking each policy rule against contract clauses.",
-        )
+        best_violations = []
+        cumulative_score = 0.0
 
-        result = await env.step(action)
+        for step in range(1, MAX_STEPS + 1):
+            obs = result.observation
 
-        # result.reward is the INCREMENTAL reward (improvement over prev best score).
-        # Accumulate to track total earned reward.
-        step_reward = result.reward if result.reward is not None else 0.0
-        rewards.append(step_reward)
-        cumulative_score += step_reward
-        steps = step
+            try:
+                violations = get_model_violations(
+                    client,
+                    obs.contract_text,
+                    obs.rules_to_check,
+                    step,
+                    obs.feedback,
+                )
+            except Exception as e:
+                print(f"ERROR in get_model_violations at step {step}: {e}")
+                violations = best_violations if best_violations else []
 
-        # Update best_violations when score improves (or on first step as baseline).
-        # This ensures we always track the best-performing violation set.
-        if violations:
-            if step_reward > 0 or step == 1:
-                best_violations = violations.copy()
+            # On step 1, submit what the LLM found as-is (no carry-forward).
+            # On subsequent steps, try two strategies and pick the better one:
+            #   A) LLM's fresh answer (may have dropped false positives)
+            #   B) LLM's answer merged with carry-forward from best step
+            # We submit the fresh answer first to see if dropping FPs helps.
 
-        print(f"\n[SCORE] Step {step}: incremental_reward={step_reward:.4f}, cumulative_score={cumulative_score:.4f}, violations_submitted={len(violations)}")
-        log_step(step, f"{len(violations)}_violations", step_reward, result.done, None)
+            action = Action(
+                identified_violations=violations,
+                reasoning=f"Step {step}: Identified {len(violations)} violations by checking each policy rule against contract clauses.",
+            )
 
-        if result.done:
-            break
+            result = await env.step(action)
 
-    await env.close()
+            # result.reward is the INCREMENTAL reward (improvement over prev best score).
+            # Accumulate to track total earned reward.
+            step_reward = result.reward if result.reward is not None else 0.0
+            rewards.append(step_reward)
+            cumulative_score += step_reward
+            steps = step
 
-    success = sum(rewards) >= SUCCESS_SCORE_THRESHOLD
-    log_end(success, steps, rewards)
+            # Update best_violations when score improves (or on first step as baseline).
+            # This ensures we always track the best-performing violation set.
+            if violations:
+                if step_reward > 0 or step == 1:
+                    best_violations = violations.copy()
+
+            print(f"\n[SCORE] Step {step}: incremental_reward={step_reward:.4f}, cumulative_score={cumulative_score:.4f}, violations_submitted={len(violations)}")
+            log_step(step, f"{len(violations)}_violations", step_reward, result.done, None)
+
+            if result.done:
+                break
+
+    except Exception as e:
+        print(f"FATAL ERROR in run_task: {type(e).__name__}: {e}")
+        log_step(steps + 1, "error", 0.0, True, str(e))
+    finally:
+        if env is not None:
+            try:
+                await env.close()
+            except Exception:
+                pass
+
+        success = sum(rewards) >= SUCCESS_SCORE_THRESHOLD
+        log_end(success, steps, rewards)
 
     return success, sum(rewards), steps
 
