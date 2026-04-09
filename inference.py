@@ -52,13 +52,18 @@ from my_env import Action, LegalContractClient
 
 
 def _resolve_api_key() -> str:
-    """Return the API key from whichever env var the runner provided."""
-    for var in ("HF_TOKEN", "OPENAI_API_KEY", "API_KEY"):
+    """Return the API key from whichever env var the runner provided.
+
+    Priority order: API_KEY > OPENAI_API_KEY > HF_TOKEN
+    The validator injects API_KEY, so it MUST be checked first.
+    """
+    for var in ("API_KEY", "OPENAI_API_KEY", "HF_TOKEN"):
         val = os.environ.get(var)
         if val:
+            print(f"[CONFIG] Using API key from {var}")
             return val
     raise EnvironmentError(
-        "No API key found. Set one of: HF_TOKEN, OPENAI_API_KEY, API_KEY"
+        "No API key found. Set one of: API_KEY, OPENAI_API_KEY, HF_TOKEN"
     )
 
 
@@ -71,6 +76,12 @@ MAX_STEPS = int(os.getenv("MAX_STEPS", "10"))
 TEMPERATURE = 0.0
 MAX_TOKENS = 4096
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
+
+# Force the OpenAI SDK's auto-detected env vars to match our resolved values.
+# This prevents the SDK from silently using a different key or base URL
+# that was set elsewhere in the environment (e.g. OPENAI_API_KEY from HF).
+os.environ["OPENAI_API_KEY"] = API_KEY
+os.environ["OPENAI_BASE_URL"] = API_BASE_URL
 
 # Debug: show which endpoint and key prefix are in use
 print(f"[CONFIG] API_BASE_URL = {API_BASE_URL}")
