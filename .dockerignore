@@ -1,0 +1,24 @@
+# Never bake local credentials or dev overrides into the image.
+# The validator injects API_KEY, API_BASE_URL, and MODEL_NAME at runtime.
+.env
+.env.*
+
+# Dev/tooling artifacts — not needed in the container
+.venv
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.gitattributes
+*.md
+Docs/
+tests/
+diagnose*.py
+diagnose*.txt
+diagnose*.md
+engine_debug.py
+engine_debug.txt
+test_api.py
+validate-submission.sh
+openenv_src.txt

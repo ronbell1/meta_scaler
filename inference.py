@@ -55,7 +55,8 @@ def _resolve_api_key() -> str:
     """Return the API key from whichever env var the runner provided.
 
     Priority order: API_KEY > OPENAI_API_KEY > HF_TOKEN
-    The validator injects API_KEY, so it MUST be checked first.
+    The validator injects API_KEY; it MUST be checked first and is the
+    only key that routes through the LiteLLM proxy.
     """
     for var in ("API_KEY", "OPENAI_API_KEY", "HF_TOKEN"):
         val = os.environ.get(var)
@@ -67,7 +68,18 @@ def _resolve_api_key() -> str:
     )
 
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+# API_BASE_URL MUST come from the environment — the validator injects its own
+# LiteLLM proxy URL here.  We provide the HF router ONLY as a last-resort
+# local-dev fallback; production runs will always have this injected.
+_raw_base_url = os.environ.get("API_BASE_URL", "")
+if not _raw_base_url:
+    print(
+        "[WARNING] API_BASE_URL not set — falling back to HF router for local dev. "
+        "The validator must inject API_BASE_URL for proxy routing to work.",
+        flush=True,
+    )
+    _raw_base_url = "https://router.huggingface.co/v1"
+API_BASE_URL = _raw_base_url
 API_KEY = _resolve_api_key()
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
@@ -242,8 +254,10 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
 
 def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    # score is the total cumulative reward clamped to [0.0, 1.0] as required
+    score = min(1.0, max(0.0, sum(rewards)))
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END]   success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 

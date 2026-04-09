@@ -6,7 +6,9 @@ app: server/app.py
 port: 7860
 
 config:
-  API_BASE_URL: https://router.huggingface.co/v1
+  # API_BASE_URL is intentionally omitted — the validator injects its own
+  # LiteLLM proxy URL via the API_BASE_URL environment variable at runtime.
+  # Hardcoding it here would bypass the proxy and fail the LLM criteria check.
   MODEL_NAME: Qwen/Qwen2.5-72B-Instruct
 
 tasks:
