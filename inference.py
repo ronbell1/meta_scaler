@@ -5,7 +5,6 @@ MANDATORY env vars (injected by the validator at runtime):
   API_BASE_URL        The LiteLLM proxy endpoint URL.
   HF_TOKEN or API_KEY The API key for the LiteLLM proxy.
   MODEL_NAME          The model identifier to use for inference.
-  LOCAL_IMAGE_NAME    Docker image name for the env container.
 
 STDOUT FORMAT
   [START] task=<task_name> env=<benchmark> model=<model_name>
@@ -18,7 +17,6 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 import textwrap
 import time
 import traceback
@@ -31,24 +29,10 @@ if _env_path.exists():
     load_dotenv(_env_path, override=False)
 
 from openai import OpenAI
-from openenv.core.containers.runtime import LocalDockerProvider
 from models import PolicyViolation
 from my_env import Action, LegalContractClient
 
-# ── API Configuration ──────────────────────────────────────────────────────────
-# Accept both HF_TOKEN (what the validator injects) and API_KEY (fallback)
-API_BASE_URL = os.environ.get("API_BASE_URL", "")
-API_KEY = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
-
-if not API_BASE_URL:
-    raise EnvironmentError(
-        "API_BASE_URL is not set. The validator must inject this variable."
-    )
-if not API_KEY:
-    raise EnvironmentError(
-        "Neither API_KEY nor HF_TOKEN is set. The validator must inject one of these."
-    )
-
+# ── Configuration (safe at module level — no env-var guards here) ─────────────
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
 BENCHMARK = "procurement-contract-audit"
@@ -56,74 +40,6 @@ MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))
 TEMPERATURE = 0.0
 MAX_TOKENS = 2048
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
-
-print(f"[CONFIG] API_BASE_URL = {API_BASE_URL}", flush=True)
-print(f"[CONFIG] MODEL_NAME   = {MODEL_NAME}", flush=True)
-print(f"[CONFIG] API_KEY      = {API_KEY[:8]}...{API_KEY[-4:]}", flush=True)
-
-
-# ── Docker Provider ────────────────────────────────────────────────────────────
-class Port7860DockerProvider(LocalDockerProvider):
-    MAX_RETRIES = 3
-    HEALTH_TIMEOUT = 30
-
-    def _cleanup_existing_container(self, name: str) -> None:
-        try:
-            subprocess.run(["docker", "rm", "-f", name],
-                           capture_output=True, text=True, check=False)
-        except Exception:
-            pass
-
-    def _wait_for_healthy(self, url: str, timeout: int = 30) -> bool:
-        import urllib.request, urllib.error
-        health_url = f"{url}/health"
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                req = urllib.request.urlopen(health_url, timeout=3)
-                if req.status == 200:
-                    print(f"Container healthy at {health_url}")
-                    return True
-            except (urllib.error.URLError, OSError):
-                pass
-            time.sleep(1)
-        print(f"WARNING: Container not healthy after {timeout}s at {health_url}")
-        return False
-
-    def start_container(self, image: str, port: Optional[int] = None,
-                        env_vars: Optional[Dict[str, str]] = None,
-                        **kwargs: Any) -> str:
-        last_error: Optional[Exception] = None
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            if port is None:
-                port = self._find_available_port()
-            self._container_name = self._generate_container_name(image)
-            self._cleanup_existing_container(self._container_name)
-            cmd = ["docker", "run", "-d", "--name", self._container_name,
-                   "-p", f"{port}:7860"]
-            if env_vars:
-                for key, value in env_vars.items():
-                    cmd.extend(["-e", f"{key}={value}"])
-            cmd.append(image)
-            print(f"\nStarting Docker container (attempt {attempt}/{self.MAX_RETRIES})...")
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                self._container_id = result.stdout.strip()
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr or ""
-                print(f"DOCKER ERROR (attempt {attempt}): {stderr}")
-                last_error = exc
-                if "port is already allocated" in stderr or "address already in use" in stderr:
-                    port = None
-                    continue
-                if "is already in use by container" in stderr:
-                    self._cleanup_existing_container(self._container_name)
-                    continue
-                raise RuntimeError(f"Docker failed: {stderr}") from exc
-            url = f"http://localhost:{port}"
-            self._wait_for_healthy(url, timeout=self.HEALTH_TIMEOUT)
-            return url
-        raise RuntimeError(f"Docker failed after {self.MAX_RETRIES} attempts") from last_error
 
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
@@ -302,6 +218,24 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
 
 
 async def run_task(task_id: str):
+    # ── Validate API env vars (checked here, not at module level, because the
+    #    validator injects them *after* the container starts) ──────────────────
+    api_base_url = os.environ.get("API_BASE_URL", "")
+    api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
+
+    if not api_base_url:
+        raise EnvironmentError(
+            "API_BASE_URL is not set. The validator must inject this variable."
+        )
+    if not api_key:
+        raise EnvironmentError(
+            "Neither API_KEY nor HF_TOKEN is set. The validator must inject one of these."
+        )
+
+    print(f"[CONFIG] API_BASE_URL = {api_base_url}", flush=True)
+    print(f"[CONFIG] MODEL_NAME   = {MODEL_NAME}", flush=True)
+    print(f"[CONFIG] API_KEY      = {api_key[:8]}...{api_key[-4:]}", flush=True)
+
     # Initialize client with injected credentials — strictly no hardcoding
     client = OpenAI(
         base_url=os.environ["API_BASE_URL"],
@@ -309,7 +243,6 @@ async def run_task(task_id: str):
         timeout=60.0,
     )
 
-    image_name = os.environ.get("LOCAL_IMAGE_NAME", "my-env")
     log_start(task_id, BENCHMARK, MODEL_NAME)
 
     rewards: List[float] = []
@@ -317,9 +250,11 @@ async def run_task(task_id: str):
     env = None
 
     try:
-        env = await LegalContractClient.from_docker_image(
-            image_name, provider=Port7860DockerProvider()
-        )
+        # Connect to the environment server already running at localhost:7860
+        # inside this container (started by the Dockerfile CMD).
+        # Do NOT use from_docker_image() — there is no Docker-in-Docker.
+        env = LegalContractClient(base_url="http://localhost:7860")
+        await env.connect()
         result = await env.reset(task_id=task_id)
         best_violations = []
         cumulative_score = 0.0
