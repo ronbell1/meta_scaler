@@ -26,10 +26,6 @@ STDOUT FORMAT
 
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv(Path(__file__).resolve().parent / ".env")
-
 import asyncio
 import json
 import os
@@ -39,20 +35,47 @@ import textwrap
 import time
 from typing import Any, Dict, List, Optional
 
+# Only load .env as a fallback for LOCAL development.
+# The validator / CI runner injects its own env vars (API_BASE_URL, API key)
+# BEFORE the process starts, so we must NOT override them.
+from dotenv import load_dotenv
+
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path, override=False)  # never override existing env vars
+
 from openai import OpenAI
 from openenv.core.containers.runtime import LocalDockerProvider
 
 from models import PolicyViolation
 from my_env import Action, LegalContractClient
 
-API_BASE_URL = os.environ["API_BASE_URL"]
-MODEL_NAME = os.environ["MODEL_NAME"]
+
+def _resolve_api_key() -> str:
+    """Return the API key from whichever env var the runner provided."""
+    for var in ("HF_TOKEN", "OPENAI_API_KEY", "API_KEY"):
+        val = os.environ.get(var)
+        if val:
+            return val
+    raise EnvironmentError(
+        "No API key found. Set one of: HF_TOKEN, OPENAI_API_KEY, API_KEY"
+    )
+
+
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY = _resolve_api_key()
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
 BENCHMARK = "procurement-contract-audit"
 MAX_STEPS = int(os.getenv("MAX_STEPS", "10"))
 TEMPERATURE = 0.0
 MAX_TOKENS = 4096
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.5"))
+
+# Debug: show which endpoint and key prefix are in use
+print(f"[CONFIG] API_BASE_URL = {API_BASE_URL}")
+print(f"[CONFIG] MODEL_NAME   = {MODEL_NAME}")
+print(f"[CONFIG] API_KEY       = {API_KEY[:8]}...{API_KEY[-4:]}")
 
 
 class Port7860DockerProvider(LocalDockerProvider):
@@ -371,8 +394,8 @@ def get_model_violations(client, contract_text, rules_to_check, step, feedback):
 async def run_task(task_id: str):
     """Run a single task and return results."""
     client = OpenAI(
-        base_url=os.environ["API_BASE_URL"],
-        api_key=os.environ["HF_TOKEN"],
+        base_url=API_BASE_URL,
+        api_key=API_KEY,
         timeout=60.0,
     )
     image_name = os.environ.get("LOCAL_IMAGE_NAME", "my-env")
