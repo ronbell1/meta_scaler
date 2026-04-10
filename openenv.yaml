@@ -17,16 +17,16 @@ tasks:
     max_steps: 5
     grader:
       type: score
-      endpoint: /grade
+      endpoint: /grade/easy
   medium:
     description: 5 violations in 3,000-word MSA with 1 red herring
     max_steps: 10
     grader:
       type: score
-      endpoint: /grade
+      endpoint: /grade/medium
   hard:
     description: Multi-document MSA+SOW+DPA with cross-document violations
     max_steps: 15
     grader:
       type: score
-      endpoint: /grade
+      endpoint: /grade/hard

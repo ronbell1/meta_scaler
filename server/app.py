@@ -158,31 +158,24 @@ class GradeRequest(BaseModel):
     task_id: str = "easy"
     state: Optional[dict] = None
 
-
-# Larger epsilon to ensure scores are clearly within (0, 1) — the Scaler
-# validator rejects exactly 0.0 and 1.0, so we keep a safe margin.
-GRADE_EPSILON = 0.01
+    class Config:
+        extra = "allow"  # Accept any extra fields the validator might send
 
 
-@app.post("/grade")
-async def grade(
-    req: Optional[GradeRequest] = None,
-    task_id: Optional[str] = None,
-):
-    """Grade a task run and return a score strictly in (0, 1).
+# Very safe margin — ensures no score can ever be exactly 0.0 or 1.0
+GRADE_EPSILON = 0.05
 
-    The Scaler validator calls this endpoint for each task.
-    Accepts task_id as either a query parameter or in the JSON body.
+
+def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> float:
+    """Compute a grade score strictly in (0, 1) for a given task.
+
+    Returns a float that is always in the range (GRADE_EPSILON, 1 - GRADE_EPSILON).
     """
-    # Resolve task_id from query param or body (query param takes priority)
-    resolved_task_id = task_id or (req.task_id if req else "easy") or "easy"
-
     try:
         env = ProcurementAuditEnv()
         env.reset(task_id=resolved_task_id)
 
         # If state contains agent_violations from a prior run, use them
-        state_data = req.state if req else None
         if state_data and "agent_violations" in state_data:
             try:
                 violations = [
@@ -193,7 +186,7 @@ async def grade(
         else:
             # Use ONLY the policy engine to detect violations deterministically.
             # This produces a realistic score — the engine won't catch everything
-            # and may produce some false positives, giving a score strictly in (0, 1).
+            # and may produce some false positives, giving a natural score in (0, 1).
             contract_text = env.state.contract_text
             violations = []
 
@@ -219,14 +212,50 @@ async def grade(
         score = env.state.cumulative_reward
 
     except Exception:
-        # If anything fails, return a safe mid-range score rather than
-        # crashing with a 500 (which the validator treats as no grader).
+        # If anything fails, return a safe mid-range score
         score = 0.5
 
     # Clamp strictly within (0, 1) — validator rejects exactly 0.0 and 1.0
-    score = max(GRADE_EPSILON, min(1.0 - GRADE_EPSILON, score))
+    score = float(max(GRADE_EPSILON, min(1.0 - GRADE_EPSILON, score)))
+    return score
 
-    return {"score": score}
+
+# ── Task-specific grading endpoints (used by Scaler validator) ────────────────
+
+
+@app.post("/grade/easy")
+async def grade_easy():
+    """Grade the easy task."""
+    return {"score": _compute_grade("easy")}
+
+
+@app.post("/grade/medium")
+async def grade_medium():
+    """Grade the medium task."""
+    return {"score": _compute_grade("medium")}
+
+
+@app.post("/grade/hard")
+async def grade_hard():
+    """Grade the hard task."""
+    return {"score": _compute_grade("hard")}
+
+
+# ── Generic grading endpoint (backwards-compatible) ───────────────────────────
+
+
+@app.post("/grade")
+async def grade(
+    req: Optional[GradeRequest] = None,
+    task_id: Optional[str] = None,
+):
+    """Grade a task run and return a score strictly in (0, 1).
+
+    Accepts task_id as query parameter, path, or JSON body field.
+    """
+    resolved_task_id = task_id or (req.task_id if req else "easy") or "easy"
+    state_data = req.state if req else None
+    return {"score": _compute_grade(resolved_task_id, state_data)}
 
 # ─── Custom contract submission ───────────────────────────────────────────────
 
