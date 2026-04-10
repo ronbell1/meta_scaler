@@ -221,21 +221,25 @@ def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> 
 
 
 # ── Task-specific grading endpoints (used by Scaler validator) ────────────────
+# Support both GET and POST — the validator may use either HTTP method.
 
 
 @app.post("/grade/easy")
+@app.get("/grade/easy")
 async def grade_easy():
     """Grade the easy task."""
     return {"score": _compute_grade("easy")}
 
 
 @app.post("/grade/medium")
+@app.get("/grade/medium")
 async def grade_medium():
     """Grade the medium task."""
     return {"score": _compute_grade("medium")}
 
 
 @app.post("/grade/hard")
+@app.get("/grade/hard")
 async def grade_hard():
     """Grade the hard task."""
     return {"score": _compute_grade("hard")}
@@ -245,6 +249,7 @@ async def grade_hard():
 
 
 @app.post("/grade")
+@app.get("/grade")
 async def grade(
     req: Optional[GradeRequest] = None,
     task_id: Optional[str] = None,
@@ -256,6 +261,16 @@ async def grade(
     resolved_task_id = task_id or (req.task_id if req else "easy") or "easy"
     state_data = req.state if req else None
     return {"score": _compute_grade(resolved_task_id, state_data)}
+
+
+# ── Dynamic task grading route ────────────────────────────────────────────────
+
+
+@app.post("/grade/{task_id}")
+@app.get("/grade/{task_id}")
+async def grade_by_task_id(task_id: str):
+    """Grade any task by its ID (dynamic route)."""
+    return {"score": _compute_grade(task_id)}
 
 # ─── Custom contract submission ───────────────────────────────────────────────
 

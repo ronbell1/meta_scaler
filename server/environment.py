@@ -289,10 +289,10 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
             task_id=task_id,
             task_name=self._task.description[:80],
             step=0,
-            last_reward=0.0,
+            last_reward=EPSILON,
             feedback="Review the contract and identify all policy violations.",
             rules_to_check=rules_to_check,
-            reward=0.0,
+            reward=None,
             done=False,
             user_can_submit=True,
             partial_progress=_compute_partial_progress([], self._gold_violations),
@@ -322,7 +322,9 @@ class ProcurementAuditEnv(Environment[Action, Observation, State]):
         )
 
         prev_best = s.cumulative_reward
-        reward = max(0.0, score - prev_best)
+        raw_reward = max(0.0, score - prev_best)
+        # Clamp reward strictly within (0, 1) — validator rejects 0.0 and 1.0
+        reward = max(EPSILON, min(1.0 - EPSILON, raw_reward))
         s.cumulative_reward = max(s.cumulative_reward, score)
 
         done = (s.step >= s.max_steps) or (score >= 1.0 - EPSILON)
