@@ -163,7 +163,7 @@ class GradeRequest(BaseModel):
 
 
 # Very safe margin — ensures no score can ever be exactly 0.0 or 1.0
-GRADE_EPSILON = 0.05
+GRADE_EPSILON = 0.01
 
 
 def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> float:

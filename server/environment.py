@@ -153,7 +153,7 @@ def _find_clause_reference(contract_text: str, rule_id: str) -> str:
 
 # ─── grading ──────────────────────────────────────────────────────────────
 
-EPSILON = 0.05
+EPSILON = 0.01
 
 
 def grade_action(
