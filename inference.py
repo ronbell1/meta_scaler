@@ -34,7 +34,7 @@ from my_env import Action, LegalContractClient
 
 # ── Configuration (safe at module level — no env-var guards here) ─────────────
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
-TASK_NAME = os.getenv("PROCUREMENT_TASK", "easy")
+TASK_NAME = os.getenv("PROCUREMENT_TASK", "all")
 BENCHMARK = "procurement-contract-audit"
 MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))
 TEMPERATURE = 0.0
@@ -307,7 +307,7 @@ async def run_task(task_id: str):
 
 
 async def main():
-    task_id = os.getenv("PROCUREMENT_TASK", "easy")
+    task_id = os.getenv("PROCUREMENT_TASK", "all")
     if task_id == "all":
         for tid in ["easy", "medium", "hard"]:
             print(f"\n{'='*60}\nRunning task: {tid}\n{'='*60}")
