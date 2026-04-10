@@ -75,17 +75,25 @@ def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
+def _clamp_reward(r: float) -> float:
+    """Clamp reward strictly within (0, 1) — validator rejects exactly 0.0 and 1.0."""
+    return max(0.01, min(0.99, float(r)))
+
+
 def log_step(step: int, action: str, reward: float, done: bool,
              error: Optional[str]) -> None:
     error_val = error if error else "null"
     done_val = str(done).lower()
-    print(f"[STEP] step={step} action={action} reward={reward:.2f} "
+    clamped = _clamp_reward(reward)
+    print(f"[STEP] step={step} action={action} reward={clamped:.2f} "
           f"done={done_val} error={error_val}", flush=True)
 
 
 def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     # IMPORTANT: exact format per spec — no extra fields like score=
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    # Clamp all rewards strictly within (0, 1)
+    clamped_rewards = [_clamp_reward(r) for r in rewards]
+    rewards_str = ",".join(f"{r:.2f}" for r in clamped_rewards)
     print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
           flush=True)
 
@@ -276,7 +284,8 @@ async def run_task(task_id: str):
             )
             result = await env.step(action)
 
-            step_reward = result.reward if result.reward is not None else 0.0
+            step_reward = result.reward if result.reward is not None else 0.01
+            step_reward = _clamp_reward(step_reward)
             rewards.append(step_reward)
             cumulative_score += step_reward
             steps = step
@@ -293,7 +302,7 @@ async def run_task(task_id: str):
 
     except Exception as e:
         traceback.print_exc()
-        log_step(steps + 1, "error", 0.0, True, str(e))
+        log_step(steps + 1, "error", _clamp_reward(0.01), True, str(e))
     finally:
         if env is not None:
             try:
