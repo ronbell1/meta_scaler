@@ -46,7 +46,7 @@ procurement-audit-env/
 
 ```python
 Action(
-    identified_violations: List[PolicyViolation],  # violations found by agent
+    identified_violations: List[PolicyViolation],  # violations found
     reasoning: Optional[str]                       # optional explanation
 )
 ```
