@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -166,6 +166,16 @@ class GradeRequest(BaseModel):
 GRADE_EPSILON = 0.01
 
 
+def _safe_clamp(score: float) -> float:
+    """Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0."""
+    s = float(score)
+    if s <= 0.0 or s != s:  # handles NaN too
+        s = GRADE_EPSILON
+    if s >= 1.0:
+        s = 1.0 - GRADE_EPSILON
+    return s
+
+
 def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> float:
     """Compute a grade score strictly in (0, 1) for a given task.
 
@@ -211,38 +221,65 @@ def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> 
         env.step(action)
         score = env.state.cumulative_reward
 
-    except Exception:
+    except Exception as exc:
         # If anything fails, return a safe mid-range score
+        print(f"[GRADE] Exception computing grade for {resolved_task_id}: {exc}", flush=True)
         score = 0.5
 
     # Clamp strictly within (0, 1) — validator rejects exactly 0.0 and 1.0
-    score = float(max(GRADE_EPSILON, min(1.0 - GRADE_EPSILON, score)))
+    score = _safe_clamp(score)
+    print(f"[GRADE] task={resolved_task_id} score={score}", flush=True)
     return score
 
 
 # ── Task-specific grading endpoints (used by Scaler validator) ────────────────
 # Support both GET and POST — the validator may use either HTTP method.
+# Accept optional request body so we don't reject validator payloads.
 
 
 @app.post("/grade/easy")
 @app.get("/grade/easy")
-async def grade_easy():
+async def grade_easy(request: Request):
     """Grade the easy task."""
-    return {"score": _compute_grade("easy")}
+    state_data = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            state_data = body.get("state")
+    except Exception:
+        pass
+    score = _compute_grade("easy", state_data)
+    return {"score": _safe_clamp(score)}
 
 
 @app.post("/grade/medium")
 @app.get("/grade/medium")
-async def grade_medium():
+async def grade_medium(request: Request):
     """Grade the medium task."""
-    return {"score": _compute_grade("medium")}
+    state_data = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            state_data = body.get("state")
+    except Exception:
+        pass
+    score = _compute_grade("medium", state_data)
+    return {"score": _safe_clamp(score)}
 
 
 @app.post("/grade/hard")
 @app.get("/grade/hard")
-async def grade_hard():
+async def grade_hard(request: Request):
     """Grade the hard task."""
-    return {"score": _compute_grade("hard")}
+    state_data = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            state_data = body.get("state")
+    except Exception:
+        pass
+    score = _compute_grade("hard", state_data)
+    return {"score": _safe_clamp(score)}
 
 
 # ── Generic grading endpoint (backwards-compatible) ───────────────────────────
@@ -260,7 +297,8 @@ async def grade(
     """
     resolved_task_id = task_id or (req.task_id if req else "easy") or "easy"
     state_data = req.state if req else None
-    return {"score": _compute_grade(resolved_task_id, state_data)}
+    score = _compute_grade(resolved_task_id, state_data)
+    return {"score": _safe_clamp(score)}
 
 
 # ── Dynamic task grading route ────────────────────────────────────────────────
@@ -268,9 +306,17 @@ async def grade(
 
 @app.post("/grade/{task_id}")
 @app.get("/grade/{task_id}")
-async def grade_by_task_id(task_id: str):
+async def grade_by_task_id(task_id: str, request: Request):
     """Grade any task by its ID (dynamic route)."""
-    return {"score": _compute_grade(task_id)}
+    state_data = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            state_data = body.get("state")
+    except Exception:
+        pass
+    score = _compute_grade(task_id, state_data)
+    return {"score": _safe_clamp(score)}
 
 # ─── Custom contract submission ───────────────────────────────────────────────
 
