@@ -151,55 +151,73 @@ async def get_tasks():
     return list_tasks()
 
 
-# ─── Grading endpoint (called by Scaler validator) ────────────────────────────
+# ─── Grading (called by Scaler validator) ─────────────────────────────────────
+# Pattern from fix.md: thin scorer — parse body, score directly, clamp, return.
+# Two-layer clamping: Layer 1 in grade_action(), Layer 2 here in endpoints.
 
+from .environment import grade_action, compute_gold_violations
+from .tasks import get_task
 
-class GradeRequest(BaseModel):
-    task_id: str = "easy"
-    state: Optional[dict] = None
-
-    class Config:
-        extra = "allow"  # Accept any extra fields the validator might send
-
-
-# Very safe margin — ensures no score can ever be exactly 0.0 or 1.0
 GRADE_EPSILON = 0.01
 
 
 def _safe_clamp(score: float) -> float:
     """Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0."""
-    s = float(score)
-    if s <= 0.0 or s != s:  # handles NaN too
-        s = GRADE_EPSILON
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return 0.5
+    if s != s:  # NaN
+        return 0.5
+    if s <= 0.0:
+        return GRADE_EPSILON
     if s >= 1.0:
-        s = 1.0 - GRADE_EPSILON
+        return 1.0 - GRADE_EPSILON
     return s
 
 
-def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> float:
-    """Compute a grade score strictly in (0, 1) for a given task.
+async def _grade(task_id: str, request: Request) -> dict:
+    """Core grading function following fix.md pattern.
 
-    Returns a float that is always in the range (GRADE_EPSILON, 1 - GRADE_EPSILON).
+    1. Parse body for agent action (violations / raw_text)
+    2. Score directly against gold violations
+    3. Clamp to (0.01, 0.99)
+    4. Return {"score": X}
     """
     try:
-        env = ProcurementAuditEnv()
-        env.reset(task_id=resolved_task_id)
+        # ── Parse agent action from request body ──────────────────────────
+        violations: list = []
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                # Validator might send violations in various formats
+                if "identified_violations" in body:
+                    violations = [
+                        PolicyViolation(**v) if isinstance(v, dict) else v
+                        for v in body["identified_violations"]
+                    ]
+                elif "action" in body and isinstance(body["action"], dict):
+                    action_data = body["action"]
+                    if "identified_violations" in action_data:
+                        violations = [
+                            PolicyViolation(**v) if isinstance(v, dict) else v
+                            for v in action_data["identified_violations"]
+                        ]
+                elif "state" in body and isinstance(body["state"], dict):
+                    state = body["state"]
+                    if "agent_violations" in state:
+                        violations = [
+                            PolicyViolation(**v) if isinstance(v, dict) else v
+                            for v in state["agent_violations"]
+                        ]
+        except Exception:
+            pass  # GET request or no body — use default
 
-        # If state contains agent_violations from a prior run, use them
-        if state_data and "agent_violations" in state_data:
-            try:
-                violations = [
-                    PolicyViolation(**v) for v in state_data["agent_violations"]
-                ]
-            except Exception:
-                violations = []
-        else:
-            # Use ONLY the policy engine to detect violations deterministically.
-            # This produces a realistic score — the engine won't catch everything
-            # and may produce some false positives, giving a natural score in (0, 1).
+        # ── If no violations from body, run policy engine ─────────────────
+        if not violations:
+            env = ProcurementAuditEnv()
+            env.reset(task_id=task_id)
             contract_text = env.state.contract_text
-            violations = []
-
             engine_results = run_policy_check(contract_text)
             for rule_id, is_violation in engine_results.items():
                 if is_violation:
@@ -214,109 +232,70 @@ def _compute_grade(resolved_task_id: str, state_data: Optional[dict] = None) -> 
                             )
                         )
 
-        action = Action(
-            identified_violations=violations,
-            reasoning=f"Grading: detected {len(violations)} violations.",
-        )
-        env.step(action)
-        score = env.state.cumulative_reward
+        # ── Score directly against gold (Layer 1 clamp in grade_action) ───
+        task_config = get_task(task_id)
+        env = ProcurementAuditEnv()
+        env.reset(task_id=task_id)
+        gold_violations = env.state.gold_violations
+
+        score, _feedback = grade_action(violations, gold_violations, task_config)
 
     except Exception as exc:
-        # If anything fails, return a safe mid-range score
-        print(f"[GRADE] Exception computing grade for {resolved_task_id}: {exc}", flush=True)
+        print(f"[GRADE] Exception for {task_id}: {exc}", flush=True)
         score = 0.5
 
-    # Clamp strictly within (0, 1) — validator rejects exactly 0.0 and 1.0
+    # ── Layer 2 clamp ─────────────────────────────────────────────────────
     score = _safe_clamp(score)
-    print(f"[GRADE] task={resolved_task_id} score={score}", flush=True)
-    return score
+    print(f"[GRADE] task={task_id} score={score}", flush=True)
+    return {"score": score}
 
 
-# ── Task-specific grading endpoints (used by Scaler validator) ────────────────
-# Support both GET and POST — the validator may use either HTTP method.
-# Accept optional request body so we don't reject validator payloads.
+# ── Per-task grading endpoints (GET + POST for each) ──────────────────────────
 
-
-@app.post("/grade/easy")
 @app.get("/grade/easy")
+@app.post("/grade/easy")
 async def grade_easy(request: Request):
     """Grade the easy task."""
-    state_data = None
-    try:
-        body = await request.json()
-        if isinstance(body, dict):
-            state_data = body.get("state")
-    except Exception:
-        pass
-    score = _compute_grade("easy", state_data)
-    return {"score": _safe_clamp(score)}
+    return await _grade("easy", request)
 
 
-@app.post("/grade/medium")
 @app.get("/grade/medium")
+@app.post("/grade/medium")
 async def grade_medium(request: Request):
     """Grade the medium task."""
-    state_data = None
-    try:
-        body = await request.json()
-        if isinstance(body, dict):
-            state_data = body.get("state")
-    except Exception:
-        pass
-    score = _compute_grade("medium", state_data)
-    return {"score": _safe_clamp(score)}
+    return await _grade("medium", request)
 
 
-@app.post("/grade/hard")
 @app.get("/grade/hard")
+@app.post("/grade/hard")
 async def grade_hard(request: Request):
     """Grade the hard task."""
-    state_data = None
-    try:
-        body = await request.json()
-        if isinstance(body, dict):
-            state_data = body.get("state")
-    except Exception:
-        pass
-    score = _compute_grade("hard", state_data)
-    return {"score": _safe_clamp(score)}
+    return await _grade("hard", request)
 
 
-# ── Generic grading endpoint (backwards-compatible) ───────────────────────────
+# ── Generic /grade fallback ───────────────────────────────────────────────────
 
-
-@app.post("/grade")
 @app.get("/grade")
-async def grade(
-    req: Optional[GradeRequest] = None,
-    task_id: Optional[str] = None,
-):
-    """Grade a task run and return a score strictly in (0, 1).
-
-    Accepts task_id as query parameter, path, or JSON body field.
-    """
-    resolved_task_id = task_id or (req.task_id if req else "easy") or "easy"
-    state_data = req.state if req else None
-    score = _compute_grade(resolved_task_id, state_data)
-    return {"score": _safe_clamp(score)}
-
-
-# ── Dynamic task grading route ────────────────────────────────────────────────
-
-
-@app.post("/grade/{task_id}")
-@app.get("/grade/{task_id}")
-async def grade_by_task_id(task_id: str, request: Request):
-    """Grade any task by its ID (dynamic route)."""
-    state_data = None
+@app.post("/grade")
+async def grade_generic(request: Request):
+    """Fallback: accept task_id from query param or body."""
+    task_id = "easy"
     try:
         body = await request.json()
         if isinstance(body, dict):
-            state_data = body.get("state")
+            task_id = body.get("task_id", "easy")
     except Exception:
         pass
-    score = _compute_grade(task_id, state_data)
-    return {"score": _safe_clamp(score)}
+    return await _grade(task_id, request)
+
+
+# ── Dynamic /grade/{task_id} catch-all ────────────────────────────────────────
+
+@app.get("/grade/{task_id}")
+@app.post("/grade/{task_id}")
+async def grade_by_task_id(task_id: str, request: Request):
+    """Grade any task by its ID."""
+    return await _grade(task_id, request)
 
 # ─── Custom contract submission ───────────────────────────────────────────────
 
