@@ -89,12 +89,13 @@ def log_step(step: int, action: str, reward: float, done: bool,
           f"done={done_val} error={error_val}", flush=True)
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
-    # IMPORTANT: exact format per spec — no extra fields like score=
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    # Include score= field — the validator parses this as the task score.
     # Clamp all rewards strictly within (0, 1)
     clamped_rewards = [_clamp_reward(r) for r in rewards]
+    clamped_score = _clamp_reward(score)
     rewards_str = ",".join(f"{r:.2f}" for r in clamped_rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+    print(f"[END] success={str(success).lower()} steps={steps} score={clamped_score:.3f} rewards={rewards_str}",
           flush=True)
 
 
@@ -310,9 +311,13 @@ async def run_task(task_id: str):
             except Exception:
                 pass
 
-    success = sum(rewards) >= SUCCESS_SCORE_THRESHOLD
-    log_end(success, steps, rewards)
-    return success, sum(rewards), steps
+    # Compute final task score: use the max step reward as a proxy for task quality
+    # (the best single-step score reflects how well the agent solved the task)
+    final_score = max(rewards) if rewards else 0.01
+    final_score = _clamp_reward(final_score)
+    success = final_score >= SUCCESS_SCORE_THRESHOLD
+    log_end(success, steps, final_score, rewards)
+    return success, final_score, steps
 
 
 async def main():
